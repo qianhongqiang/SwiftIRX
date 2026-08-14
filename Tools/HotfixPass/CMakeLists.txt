@@ -4,8 +4,19 @@ project(HotfixPass LANGUAGES C CXX)
 
 set(SWIFT_LLVM_COMMIT "8f0d2ca924db37c8f8161d55c21b9097b05b72f3")
 set(SWIFT_LLVM_VERSION "19.1.5")
-set(SWIFT_LLVM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.toolchain/swift-llvm-project")
-set(SWIFT_LLVM_GENERATED "${CMAKE_CURRENT_SOURCE_DIR}/.toolchain/generated")
+set(
+  SWIFT_LLVM_REPOSITORY
+  "https://github.com/swiftlang/llvm-project.git"
+  CACHE STRING "Repository used to bootstrap the pinned Swift LLVM headers"
+)
+set(
+  SWIFT_LLVM_CACHE_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/.toolchain"
+  CACHE PATH "Directory for pinned Swift LLVM headers and generated tables"
+)
+set(SWIFT_LLVM_ROOT "${SWIFT_LLVM_CACHE_DIR}/swift-llvm-project")
+set(SWIFT_LLVM_GENERATED "${SWIFT_LLVM_CACHE_DIR}/generated")
+include(cmake/ToolchainValidation.cmake)
 
 function(run_checked description)
   execute_process(
@@ -29,75 +40,113 @@ execute_process(
   ERROR_VARIABLE swift_error
 )
 string(CONCAT swift_version "${swift_output}" "${swift_error}")
-if(NOT swift_result EQUAL 0 OR
-   NOT swift_version MATCHES "Apple Swift version 6\\.2\\.4")
+hotfix_swift_version_matches("${swift_version}" swift_version_matches)
+if(NOT swift_result EQUAL 0 OR NOT swift_version_matches)
   message(FATAL_ERROR
-    "HotfixPass requires Apple Swift 6.2.4, found:\n${swift_version}"
+    "HotfixPass requires Apple Swift 6.2.4 "
+    "(swiftlang-6.2.4.1.4 clang-1700.6.4.2), found:\n${swift_version}"
   )
 endif()
 
-if(NOT EXISTS "${SWIFT_LLVM_ROOT}/.git")
-  if(EXISTS "${SWIFT_LLVM_ROOT}")
+function(validate_swift_llvm_checkout checkout_root)
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${checkout_root}" rev-parse --verify HEAD
+    RESULT_VARIABLE checkout_revision_result
+    OUTPUT_VARIABLE checkout_revision
+    ERROR_VARIABLE checkout_revision_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(NOT checkout_revision_result EQUAL 0 OR
+     NOT checkout_revision STREQUAL SWIFT_LLVM_COMMIT)
     message(FATAL_ERROR
-      "Remove incomplete toolchain cache at ${SWIFT_LLVM_ROOT} and configure again"
+      "Swift LLVM cache must be commit ${SWIFT_LLVM_COMMIT}; found "
+      "${checkout_revision}${checkout_revision_error}"
     )
   endif()
 
-  file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.toolchain")
-  run_checked("Initializing Swift LLVM cache"
-    "${GIT_EXECUTABLE}" init "${SWIFT_LLVM_ROOT}"
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${checkout_root}" status
+      --porcelain=v1 --untracked-files=all
+    RESULT_VARIABLE checkout_status_result
+    OUTPUT_VARIABLE checkout_status
+    ERROR_VARIABLE checkout_status_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE
   )
-  run_checked("Adding Swift LLVM remote"
-    "${GIT_EXECUTABLE}" -C "${SWIFT_LLVM_ROOT}" remote add origin
-    https://github.com/swiftlang/llvm-project.git
-  )
-  run_checked("Enabling sparse checkout"
-    "${GIT_EXECUTABLE}" -C "${SWIFT_LLVM_ROOT}" sparse-checkout init --cone
-  )
-  run_checked("Selecting Swift LLVM headers"
-    "${GIT_EXECUTABLE}" -C "${SWIFT_LLVM_ROOT}" sparse-checkout set
-    cmake llvm/include
-  )
-  run_checked("Fetching pinned Swift LLVM"
-    "${GIT_EXECUTABLE}" -C "${SWIFT_LLVM_ROOT}" fetch --depth 1 origin
-    "${SWIFT_LLVM_COMMIT}"
-  )
-  run_checked("Checking out pinned Swift LLVM"
-    "${GIT_EXECUTABLE}" -c advice.detachedHead=false
-    -C "${SWIFT_LLVM_ROOT}" checkout --detach FETCH_HEAD
-  )
-endif()
+  if(NOT checkout_status_result EQUAL 0)
+    message(FATAL_ERROR
+      "Could not inspect Swift LLVM cache:\n${checkout_status_error}"
+    )
+  endif()
+  if(NOT checkout_status STREQUAL "")
+    message(FATAL_ERROR
+      "Swift LLVM cache must be pristine; found:\n${checkout_status}"
+    )
+  endif()
 
-execute_process(
-  COMMAND "${GIT_EXECUTABLE}" -C "${SWIFT_LLVM_ROOT}" rev-parse HEAD
-  RESULT_VARIABLE revision_result
-  OUTPUT_VARIABLE swift_llvm_revision
-  ERROR_VARIABLE revision_error
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-if(NOT revision_result EQUAL 0 OR
-   NOT swift_llvm_revision STREQUAL SWIFT_LLVM_COMMIT)
-  message(FATAL_ERROR
-    "Swift LLVM cache must be commit ${SWIFT_LLVM_COMMIT}; found "
-    "${swift_llvm_revision}${revision_error}"
-  )
-endif()
-
-set(SWIFT_LLVM_VERSION_FILE
-  "${SWIFT_LLVM_ROOT}/cmake/Modules/LLVMVersion.cmake"
-)
-file(READ "${SWIFT_LLVM_VERSION_FILE}" swift_llvm_version_file)
-foreach(version_part IN ITEMS
-    "LLVM_VERSION_MAJOR 19"
-    "LLVM_VERSION_MINOR 1"
-    "LLVM_VERSION_PATCH 5")
-  string(FIND "${swift_llvm_version_file}" "${version_part}" version_match)
-  if(version_match EQUAL -1)
+  set(version_file "${checkout_root}/cmake/Modules/LLVMVersion.cmake")
+  file(READ "${version_file}" version_file_contents)
+  hotfix_llvm_version_matches("${version_file_contents}" version_matches)
+  if(NOT version_matches)
     message(FATAL_ERROR
       "Pinned Swift LLVM commit does not declare LLVM ${SWIFT_LLVM_VERSION}"
     )
   endif()
-endforeach()
+endfunction()
+
+set(swift_llvm_needs_bootstrap FALSE)
+if(EXISTS "${SWIFT_LLVM_ROOT}")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${SWIFT_LLVM_ROOT}"
+      rev-parse --verify HEAD
+    RESULT_VARIABLE existing_revision_result
+    OUTPUT_QUIET
+    ERROR_QUIET
+  )
+  if(NOT existing_revision_result EQUAL 0)
+    file(REMOVE_RECURSE "${SWIFT_LLVM_ROOT}")
+    set(swift_llvm_needs_bootstrap TRUE)
+  endif()
+else()
+  set(swift_llvm_needs_bootstrap TRUE)
+endif()
+
+if(swift_llvm_needs_bootstrap)
+  set(bootstrap_root "${SWIFT_LLVM_ROOT}.bootstrap")
+  file(REMOVE_RECURSE "${bootstrap_root}")
+  file(MAKE_DIRECTORY "${SWIFT_LLVM_CACHE_DIR}")
+  run_checked("Initializing Swift LLVM cache"
+    "${GIT_EXECUTABLE}" init "${bootstrap_root}"
+  )
+  run_checked("Adding Swift LLVM remote"
+    "${GIT_EXECUTABLE}" -C "${bootstrap_root}" remote add origin
+    "${SWIFT_LLVM_REPOSITORY}"
+  )
+  run_checked("Enabling sparse checkout"
+    "${GIT_EXECUTABLE}" -C "${bootstrap_root}" sparse-checkout init --cone
+  )
+  run_checked("Selecting Swift LLVM headers"
+    "${GIT_EXECUTABLE}" -C "${bootstrap_root}" sparse-checkout set
+    cmake llvm/include
+  )
+  run_checked("Fetching pinned Swift LLVM"
+    "${GIT_EXECUTABLE}" -C "${bootstrap_root}" fetch --depth 1 origin
+    "${SWIFT_LLVM_COMMIT}"
+  )
+  run_checked("Checking out pinned Swift LLVM"
+    "${GIT_EXECUTABLE}" -c advice.detachedHead=false
+    -C "${bootstrap_root}" checkout --detach FETCH_HEAD
+  )
+  validate_swift_llvm_checkout("${bootstrap_root}")
+
+  file(RENAME "${bootstrap_root}" "${SWIFT_LLVM_ROOT}" RESULT rename_result)
+  if(NOT rename_result STREQUAL "0")
+    message(FATAL_ERROR
+      "Could not activate Swift LLVM cache: ${rename_result}"
+    )
+  endif()
+endif()
+
+validate_swift_llvm_checkout("${SWIFT_LLVM_ROOT}")
 
 find_package(
   LLVM 19.1.7 EXACT REQUIRED CONFIG
