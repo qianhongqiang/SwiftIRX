@@ -9,6 +9,23 @@ import Foundation
 import Testing
 @testable import IR
 
+private final class SynchronizedFailureFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+
+    func recordFailure() {
+        lock.lock()
+        failed = true
+        lock.unlock()
+    }
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return failed
+    }
+}
+
 struct IRTests {
 
     @Test func interpretNamedFunctionWithTypedArguments() throws {
@@ -503,5 +520,120 @@ struct IRTests {
 
         #expect(execution.result == 7)
         #expect(execution.patchID == "patch.v1")
+    }
+
+    @Test func managerActivatesPatchByTargetID() throws {
+        let suiteName = "ir.hotfix.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.target.v1",
+            targetID: 0x1020_3040_5060_7080,
+            signatureID: 0x8877_6655_4433_2211,
+            entryFunction: "patchedFunction",
+            ir: "define i64 @patchedFunction() { ret i64 42 }"
+        )
+
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+
+        #expect(manager.activePatch(for: patch.targetID) == patch)
+    }
+
+    @Test func managerDeactivatesOnlyRequestedTarget() throws {
+        let suiteName = "ir.hotfix.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let first = HotfixPatch(
+            id: "patch.first",
+            targetID: 101,
+            signatureID: 201,
+            entryFunction: "first",
+            ir: "first IR"
+        )
+        let second = HotfixPatch(
+            id: "patch.second",
+            targetID: 102,
+            signatureID: 202,
+            entryFunction: "second",
+            ir: "second IR"
+        )
+        manager.upsert(first)
+        manager.upsert(second)
+        try manager.activatePatch(id: first.id)
+        try manager.activatePatch(id: second.id)
+
+        manager.deactivatePatch(for: first.targetID)
+
+        #expect(manager.activePatch(for: first.targetID) == nil)
+        #expect(manager.activePatch(for: second.targetID) == second)
+    }
+
+    @Test func fnv1a64UsesStandardOffsetBasisForEmptyInput() {
+        #expect(HotfixID.fnv1a64("") == 14_695_981_039_346_656_037)
+    }
+
+    @Test func fnv1a64HashesUTF8Bytes() {
+        #expect(HotfixID.fnv1a64("a") == 12_638_187_200_555_641_996)
+    }
+
+    @Test func signatureIDUsesCanonicalABIString() {
+        let canonical = "return=i64;arguments=i64,i1;receiver=1"
+
+        #expect(
+            HotfixID.signature(
+                returnKind: .int,
+                argumentKinds: [.int, .bool],
+                hasReceiver: true
+            ) == HotfixID.fnv1a64(canonical)
+        )
+    }
+
+    @Test func concurrentActivationAndReadUseCompleteSnapshots() throws {
+        let suiteName = "ir.hotfix.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let first = HotfixPatch(
+            id: "patch.concurrent.first",
+            targetID: 301,
+            signatureID: 401,
+            entryFunction: "first",
+            ir: "first IR"
+        )
+        let second = HotfixPatch(
+            id: "patch.concurrent.second",
+            targetID: first.targetID,
+            signatureID: 402,
+            entryFunction: "second",
+            ir: "second IR"
+        )
+        manager.upsert(first)
+        manager.upsert(second)
+        try manager.activatePatch(id: first.id)
+        let failure = SynchronizedFailureFlag()
+
+        DispatchQueue.concurrentPerform(iterations: 1_000) { iteration in
+            do {
+                if iteration.isMultiple(of: 2) {
+                    try manager.activatePatch(id: first.id)
+                } else {
+                    try manager.activatePatch(id: second.id)
+                }
+            } catch {
+                failure.recordFailure()
+                return
+            }
+
+            guard let active = manager.activePatch(for: first.targetID),
+                  active == first || active == second else {
+                failure.recordFailure()
+                return
+            }
+        }
+
+        #expect(!failure.value)
     }
 }
