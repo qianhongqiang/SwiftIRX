@@ -6,7 +6,7 @@
 
 **Architecture:** A loadable LLVM New Pass Manager plugin clones each supported `swiftcc` function and replaces its original body with a C ABI runtime dispatch trampoline. The Swift runtime validates the target/signature pair, marshals scalar arguments into the existing interpreter, and returns a typed result or tells the trampoline to call the native clone.
 
-**Tech Stack:** Swift 6.2, Swift Testing, C++20, LLVM 17 New Pass Manager, CMake, Xcode 26.3, Mach-O.
+**Tech Stack:** Swift 6.2, Swift Testing, C++20, Swift LLVM 19.1.5 New Pass Manager, CMake, Xcode 26.3, Mach-O.
 
 ---
 
@@ -29,6 +29,16 @@
 
 ## Task 1: Prove LLVM Plugin Compatibility
 
+> **Compatibility correction (2026-08-14):** Although Xcode 26.3's frontend
+> reports `LLVM version 17.0.0`, Apple Swift 6.2.4 is built from the
+> `swiftlang/llvm-project` `swift-6.2.4-RELEASE` tag, whose pinned commit
+> `8f0d2ca924db37c8f8161d55c21b9097b05b72f3` declares LLVM 19.1.5. A plugin
+> compiled against Homebrew LLVM 17 loads but crashes in
+> `llvm::GlobalVariable::GlobalVariable` because the C++ IR layouts differ.
+> `Tools/HotfixPass/CMakeLists.txt` is authoritative: it sparsely bootstraps
+> that exact Swift LLVM header revision, generates its tables with Homebrew
+> LLVM 19, and rejects any mismatched frontend, source revision, or package.
+
 **Files:**
 - Create: `.gitignore`
 - Create: `Tools/HotfixPass/CMakeLists.txt`
@@ -36,15 +46,15 @@
 - Create: `Tools/HotfixPass/Tests/fixtures/swift_fixture.swift`
 - Create: `Tools/HotfixPass/Tests/verify-swift-load.sh`
 
-- [ ] **Step 1: Install the pinned LLVM 17 development package**
+- [ ] **Step 1: Install the compatible LLVM 19 development package**
 
 Run:
 
 ```bash
-brew install llvm@17 cmake
+brew install llvm@19 cmake
 ```
 
-Expected: `/opt/homebrew/opt/llvm@17/bin/llvm-config --version` prints `17.0.6`.
+Expected: `/opt/homebrew/opt/llvm@19/bin/llvm-config --version` prints `19.1.7`.
 
 - [ ] **Step 2: Exclude native build products before building the probe**
 
@@ -54,6 +64,7 @@ Create `.gitignore`:
 DerivedData/
 Tools/HotfixPass/.build/
 Tools/HotfixPass/.cmake-build/
+Tools/HotfixPass/.toolchain/
 *.bc
 *.ll.tmp
 ```
@@ -81,7 +92,7 @@ trap 'rm -f "$OUTPUT"' EXIT
 
 test -f "$PLUGIN"
 xcrun swiftc --version | grep -q 'Apple Swift version 6.2.4'
-/opt/homebrew/opt/llvm@17/bin/llvm-config --version | grep -qx '17.0.6'
+/opt/homebrew/opt/llvm@19/bin/llvm-config --version | grep -qx '19.1.7'
 xcrun swiftc -O -emit-ir \
   -parse-as-library \
   -load-pass-plugin="$PLUGIN" \
@@ -105,9 +116,9 @@ Create `Tools/HotfixPass/CMakeLists.txt`:
 
 ```cmake
 cmake_minimum_required(VERSION 3.24)
-project(HotfixPass LANGUAGES CXX)
+project(HotfixPass LANGUAGES C CXX)
 
-find_package(LLVM 17 REQUIRED CONFIG PATHS /opt/homebrew/opt/llvm@17/lib/cmake/llvm NO_DEFAULT_PATH)
+find_package(LLVM 19.1.7 EXACT REQUIRED CONFIG PATHS /opt/homebrew/opt/llvm@19/lib/cmake/llvm NO_DEFAULT_PATH)
 
 add_library(HotfixPass MODULE Sources/HotfixPass.cpp)
 target_compile_features(HotfixPass PRIVATE cxx_std_20)
@@ -661,7 +672,7 @@ git commit -m "feat: execute typed patches through C bridge"
 Create fixture functions for `swiftcc i64 (i64)`, `swiftcc i1 (i1)`, and `swiftcc void (i64)`, plus an unsupported `double` function. In `run-pass-tests.sh`, run:
 
 ```bash
-"/opt/homebrew/opt/llvm@17/bin/opt" \
+"/opt/homebrew/opt/llvm@19/bin/opt" \
   -load-pass-plugin "$PLUGIN" \
   -passes=hotfix-instrument \
   -S "$FIXTURE" -o "$OUTPUT"
@@ -855,8 +866,8 @@ Add a `PBXShellScriptBuildPhase` before `Sources` in the `IR` target. Its script
 
 ```bash
 set -euo pipefail
-LLVM_CONFIG=/opt/homebrew/opt/llvm@17/bin/llvm-config
-test "$($LLVM_CONFIG --version)" = "17.0.6"
+LLVM_CONFIG=/opt/homebrew/opt/llvm@19/bin/llvm-config
+test "$($LLVM_CONFIG --version)" = "19.1.7"
 cmake -S "$SRCROOT/Tools/HotfixPass" \
   -B "$DERIVED_FILE_DIR/HotfixPass" \
   -DCMAKE_BUILD_TYPE=Release
@@ -918,7 +929,7 @@ git commit -m "feat: enable automatic hotfix instrumentation"
 Document these exact commands:
 
 ```bash
-brew install llvm@17 cmake
+brew install llvm@19 cmake
 cmake -S Tools/HotfixPass -B Tools/HotfixPass/.cmake-build -DCMAKE_BUILD_TYPE=Release
 cmake --build Tools/HotfixPass/.cmake-build
 Tools/HotfixPass/Tests/run-pass-tests.sh
