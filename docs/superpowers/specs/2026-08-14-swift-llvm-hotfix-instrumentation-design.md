@@ -59,11 +59,12 @@ For each eligible definition, the pass:
 1. Computes a 64-bit target ID from the original mangled symbol.
 2. Computes a 64-bit signature ID from the supported LLVM return type, ordered argument types, and receiver presence.
 3. Clones the original body to a private `<symbol>.hotfix_original` function.
-4. Preserves the original symbol, linkage, calling convention, parameter attributes, return attributes, and `swiftself` placement on the trampoline.
+4. Preserves the original symbol, linkage, calling convention, ABI-significant attributes, and `swiftself` placement on the trampoline while removing old-body semantic promises invalidated by patch dispatch.
 5. Replaces the original body with a call to the C ABI runtime bridge.
 6. Returns the patch result when the bridge reports success.
 7. Calls `<symbol>.hotfix_original` with the untouched incoming values when the bridge reports failure.
 8. Remaps direct recursive references inside the clone to `<symbol>.hotfix_original`, so native fallback recursion does not repeatedly traverse the trampoline.
+9. Marks both definitions `noinline` and records them in `llvm.compiler.used`, retaining patch points and native fallbacks through O0/O2 without changing original linkage.
 
 Conceptually:
 
@@ -74,7 +75,7 @@ entry:
   ; Branch to patched or original based on the returned i1.
 }
 
-define private swiftcc i64 @calculate.hotfix_original(i64 %value) {
+define private swiftcc i64 @calculate.hotfix_original(i64 %value) noinline {
 entry:
   %result = mul i64 %value, 2
   ret i64 %result

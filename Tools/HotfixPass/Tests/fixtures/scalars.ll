@@ -153,6 +153,35 @@
 ; OPT: %in.range = icmp ult i64 %patched, 10
 ; OPT: ret i1 %in.range
 
+; RETAIN: @llvm.compiler.used = appending global [16 x ptr]
+; RETAIN-SAME: ptr @booleanTarget, ptr @booleanTarget.hotfix_original,
+; RETAIN-SAME: ptr @integerTarget, ptr @integerTarget.hotfix_original,
+; RETAIN-SAME: ptr @internalTarget, ptr @internalTarget.hotfix_original,
+; RETAIN-SAME: ptr @rangeTarget, ptr @rangeTarget.hotfix_original,
+; RETAIN-SAME: ptr @recursiveTarget, ptr @recursiveTarget.hotfix_original,
+; RETAIN-SAME: ptr @returnedTarget, ptr @returnedTarget.hotfix_original,
+; RETAIN-SAME: ptr @semanticTarget, ptr @semanticTarget.hotfix_original,
+; RETAIN-SAME: ptr @voidTarget, ptr @voidTarget.hotfix_original]
+; RETAIN: define swiftcc i64 @integerTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS:[0-9]+]] {
+; RETAIN: define swiftcc i1 @booleanTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc void @voidTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc i64 @recursiveTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc i64 @semanticTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define internal swiftcc i64 @internalTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc i64 @returnedTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc i64 @rangeTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define private swiftcc i64 @integerTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS:[0-9]+]] {
+; RETAIN: define private swiftcc i1 @booleanTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc void @voidTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc i64 @recursiveTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc i64 @semanticTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc i64 @internalTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc i64 @returnedTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc range(i64 0, 10) i64 @rangeTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN-NOT: .hotfix_original.
+; RETAIN: attributes #[[RETAIN_TRAMPOLINE_ATTRS]] = { noinline }
+; RETAIN: attributes #[[RETAIN_CLONE_ATTRS]] = { {{.*}}noinline{{.*}} }
+
 source_filename = "scalars.ll"
 
 define swiftcc i64 @integerTarget(i64 signext %value) alwaysinline {

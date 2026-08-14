@@ -11,6 +11,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <cstdint>
 #include <string>
@@ -144,7 +145,7 @@ void prepareTrampolineAttributes(Function &function) {
   function.addFnAttr(Attribute::NoInline);
 }
 
-void instrument(Function &function, FunctionCallee runtimeInvoke) {
+Function *instrument(Function &function, FunctionCallee runtimeInvoke) {
   Module &module = *function.getParent();
   LLVMContext &context = module.getContext();
   GlobalValue::LinkageTypes originalLinkage = function.getLinkage();
@@ -256,6 +257,7 @@ void instrument(Function &function, FunctionCallee runtimeInvoke) {
   } else {
     builder.CreateRet(native);
   }
+  return clone;
 }
 
 class HotfixPass : public PassInfoMixin<HotfixPass> {
@@ -276,8 +278,14 @@ public:
 
     if (!eligibleFunctions.empty()) {
       FunctionCallee runtimeInvoke = getRuntimeInvoke(module);
-      for (Function *function : eligibleFunctions)
-        instrument(*function, runtimeInvoke);
+      SmallVector<GlobalValue *> retainedFunctions;
+      retainedFunctions.reserve(eligibleFunctions.size() * 2);
+      for (Function *function : eligibleFunctions) {
+        Function *clone = instrument(*function, runtimeInvoke);
+        retainedFunctions.push_back(function);
+        retainedFunctions.push_back(clone);
+      }
+      appendToCompilerUsed(module, retainedFunctions);
     }
 
     return PreservedAnalyses::none();

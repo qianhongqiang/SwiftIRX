@@ -12,7 +12,7 @@
 
 ## File Map
 
-- Create `Tools/HotfixPass/CMakeLists.txt`: build the version-pinned loadable pass plugin.
+- Create `Tools/HotfixPass/CMakeLists.txt`: build the Homebrew LLVM 19.1.7 pass plugin.
 - Create `Tools/HotfixPass/Sources/HotfixPass.cpp`: eligibility, cloning, trampoline generation, diagnostics, and plugin registration.
 - Create `Tools/HotfixPass/Tests/fixtures/scalars.ll`: deterministic LLVM fixture for integer, boolean, void, and skip behavior.
 - Create `Tools/HotfixPass/Tests/fixtures/swift_fixture.swift`: Apple Swift bitcode compatibility fixture.
@@ -34,8 +34,8 @@
 > C++ symbols needed by cloning and IR construction, even when the plugin uses
 > matching Swift LLVM headers. The full plugin is compiled against Homebrew
 > LLVM 19.1.7 and runs in Homebrew `opt` on Apple Swift-emitted bitcode. The
-> historical direct-load steps below are superseded by this file-boundary test;
-> Task 7 provides the production `swiftc` wrapper.
+> unsafe direct-load procedure is intentionally omitted. Task 7 provides the
+> production `swiftc` wrapper.
 
 **Files:**
 - Create: `.gitignore`
@@ -62,12 +62,11 @@ Create `.gitignore`:
 DerivedData/
 Tools/HotfixPass/.build/
 Tools/HotfixPass/.cmake-build/
-Tools/HotfixPass/.toolchain/
 *.bc
 *.ll.tmp
 ```
 
-- [ ] **Step 3: Write the failing frontend-load smoke test**
+- [ ] **Step 3: Write the failing Swift-bitcode smoke test**
 
 Create `Tools/HotfixPass/Tests/fixtures/swift_fixture.swift`:
 
@@ -85,18 +84,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
-OUTPUT="$(mktemp -t hotfix-pass).ll"
-trap 'rm -f "$OUTPUT"' EXIT
+TEMP="$(mktemp -d -t hotfix-pass)"
+trap 'rm -rf "$TEMP"' EXIT
 
 test -f "$PLUGIN"
 xcrun swiftc --version | grep -q 'Apple Swift version 6.2.4'
 /opt/homebrew/opt/llvm@19/bin/llvm-config --version | grep -qx '19.1.7'
-xcrun swiftc -O -emit-ir \
+xcrun swiftc -O -emit-bc \
   -parse-as-library \
-  -load-pass-plugin="$PLUGIN" \
   "$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift" \
-  -o "$OUTPUT"
-grep -q 'hotfix-pass-loaded' "$OUTPUT"
+  -o "$TEMP/input.bc"
+/opt/homebrew/opt/llvm@19/bin/opt \
+  -load-pass-plugin "$PLUGIN" \
+  -passes=hotfix-instrument \
+  -verify-each -S "$TEMP/input.bc" -o "$TEMP/output.ll"
+grep -q 'hotfix-pass-loaded' "$TEMP/output.ll"
 ```
 
 Run:
@@ -121,7 +123,7 @@ find_package(LLVM 19.1.7 EXACT REQUIRED CONFIG PATHS /opt/homebrew/opt/llvm@19/l
 add_library(HotfixPass MODULE Sources/HotfixPass.cpp)
 target_compile_features(HotfixPass PRIVATE cxx_std_20)
 target_include_directories(HotfixPass SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
-target_compile_definitions(HotfixPass PRIVATE ${LLVM_DEFINITIONS})
+add_definitions(${LLVM_DEFINITIONS})
 set_target_properties(HotfixPass PROPERTIES
   PREFIX "lib"
   SUFFIX ".dylib"
@@ -167,7 +169,7 @@ extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo llvmGetPassPluginInfo() {
 }
 ```
 
-- [ ] **Step 5: Build and verify the plugin loads in both LLVM and Swift**
+- [ ] **Step 5: Build and verify transformation of Swift-produced bitcode**
 
 Run:
 
@@ -178,13 +180,13 @@ cmake --build Tools/HotfixPass/.cmake-build
 Tools/HotfixPass/Tests/verify-swift-load.sh
 ```
 
-Expected: PASS and the emitted Swift IR contains `hotfix-pass-loaded`.
+Expected: PASS and the transformed Swift IR contains `hotfix-pass-loaded`.
 
 - [ ] **Step 6: Commit the compatibility probe**
 
 ```bash
 git add .gitignore Tools/HotfixPass
-git commit -m "build: prove Swift LLVM pass loading"
+git commit -m "build: prove Swift bitcode transformation"
 ```
 
 ## Task 2: Add Typed Named-Function Interpretation
@@ -727,6 +729,8 @@ declare i1 @ir_hotfix_invoke(i64, i64, ptr, ptr, i32, ptr, ptr)
 
 Branch on the result, load and convert the patched result, or call the clone with the untouched original arguments. Copy the original calling convention and attribute list onto the fallback call.
 
+Mark each trampoline and clone `noinline`, and append both to `llvm.compiler.used` so O0/O2 pipelines retain every definition without changing the original symbol linkage. Strip old-body behavioral attributes such as `memory(none)`, argument `returned`, and return `range` from the trampoline; retain them on the native clone and its fallback call.
+
 - [ ] **Step 4: Register both named and automatic pipelines**
 
 ```cpp
@@ -745,7 +749,7 @@ builder.registerPipelineStartEPCallback(
 
 Use a module flag to guarantee the transformation runs once when both paths are accidentally present.
 
-- [ ] **Step 5: Run pass and Swift-load tests**
+- [ ] **Step 5: Run pass and Swift-bitcode tests**
 
 Run:
 
@@ -754,7 +758,7 @@ Tools/HotfixPass/Tests/run-pass-tests.sh
 Tools/HotfixPass/Tests/verify-swift-load.sh
 ```
 
-Expected: all scalar checks PASS, and the Swift fixture contains `ir_hotfix_invoke` and `.hotfix_original`.
+Expected: all scalar checks PASS, all tested trampolines and clones remain defined under O0/O2, and the transformed Swift fixture contains `ir_hotfix_invoke` and `.hotfix_original`.
 
 - [ ] **Step 6: Commit**
 

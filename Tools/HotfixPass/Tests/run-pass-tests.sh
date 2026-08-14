@@ -45,6 +45,10 @@ if [[ "$(grep -Fc 'define private swiftcc i64 @integerTarget.hotfix_original' "$
   echo "error: repeated pass instrumentation was not idempotent" >&2
   exit 1
 fi
+if ! grep -Fq '@llvm.compiler.used = appending global [16 x ptr]' "$TEMP/repeated.ll"; then
+  echo "error: repeated pass duplicated retained function entries" >&2
+  exit 1
+fi
 
 "$OPT" \
   -load-pass-plugin "$PLUGIN" \
@@ -69,5 +73,9 @@ fi
   <"$TEMP/optimized.ll"
 "$FILECHECK" \
   --check-prefix=OPT \
+  "$FIXTURE" \
+  <"$TEMP/optimized.ll"
+"$FILECHECK" \
+  --check-prefix=RETAIN \
   "$FIXTURE" \
   <"$TEMP/optimized.ll"
