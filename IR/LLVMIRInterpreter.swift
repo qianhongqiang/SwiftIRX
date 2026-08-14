@@ -32,6 +32,10 @@ private func llvmStableSymbolAddress(_ symbol: String) -> Int {
 final class LLVMHostContext {
     weak var rootObject: AnyObject?
 
+    init(rootObject: AnyObject?) {
+        self.rootObject = rootObject
+    }
+
 #if canImport(UIKit)
     init(rootViewController: UIViewController?) {
         self.rootObject = rootViewController
@@ -1143,6 +1147,10 @@ private struct LLVMIRParser {
 
         if rhs.hasPrefix("add i32 ") {
             let (lhs, rhsOp) = try parseIntOperands(prefix: "add i32 ", text: rhs)
+            return .add(result: resultName, lhs: lhs, rhs: rhsOp)
+        }
+        if rhs.hasPrefix("add i64 ") {
+            let (lhs, rhsOp) = try parseIntOperands(prefix: "add i64 ", text: rhs)
             return .add(result: resultName, lhs: lhs, rhs: rhsOp)
         }
         if rhs.hasPrefix("sub i32 ") {

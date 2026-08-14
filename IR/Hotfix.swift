@@ -177,6 +177,202 @@ nonisolated final class HotfixManager: @unchecked Sendable {
     }
 }
 
+nonisolated final class HotfixRecursionGuard: @unchecked Sendable {
+    private static let threadDictionaryKey = "ir.hotfix.active-targets"
+
+    func enter(_ targetID: UInt64) -> Bool {
+        let dictionary = Thread.current.threadDictionary
+        var activeTargets = dictionary[Self.threadDictionaryKey] as? Set<UInt64> ?? []
+        guard !activeTargets.contains(targetID) else {
+            return false
+        }
+        activeTargets.insert(targetID)
+        dictionary[Self.threadDictionaryKey] = activeTargets
+        return true
+    }
+
+    func leave(_ targetID: UInt64) {
+        let dictionary = Thread.current.threadDictionary
+        guard var activeTargets = dictionary[Self.threadDictionaryKey] as? Set<UInt64> else {
+            return
+        }
+        activeTargets.remove(targetID)
+        if activeTargets.isEmpty {
+            dictionary.removeObject(forKey: Self.threadDictionaryKey)
+        } else {
+            dictionary[Self.threadDictionaryKey] = activeTargets
+        }
+    }
+}
+
+nonisolated final class HotfixRuntime: @unchecked Sendable {
+    static let shared = HotfixRuntime(manager: .shared)
+
+    private let manager: HotfixManager
+    private let interpreter: LLVMIRInterpreter
+    private let recursionGuard: HotfixRecursionGuard
+
+    init(
+        manager: HotfixManager = .shared,
+        interpreter: LLVMIRInterpreter = LLVMIRInterpreter(),
+        recursionGuard: HotfixRecursionGuard = HotfixRecursionGuard()
+    ) {
+        self.manager = manager
+        self.interpreter = interpreter
+        self.recursionGuard = recursionGuard
+    }
+
+    func invoke(
+        targetID: UInt64,
+        signatureID: UInt64,
+        arguments: [LLVMInvocationValue],
+        receiver: AnyObject?
+    ) -> LLVMInvocationResult? {
+        guard let patch = manager.activePatch(for: targetID),
+              patch.signatureID == signatureID,
+              recursionGuard.enter(targetID) else {
+            return nil
+        }
+        defer { recursionGuard.leave(targetID) }
+
+        var invocationArguments = arguments
+        var host: LLVMHostContext?
+        if let receiver {
+            invocationArguments.insert(.pointer(0), at: 0)
+            host = LLVMHostContext(rootObject: receiver)
+        }
+
+        return try? interpreter.run(
+            ir: patch.ir,
+            function: patch.entryFunction,
+            arguments: invocationArguments,
+            host: host
+        )
+    }
+}
+
+nonisolated enum HotfixArgumentDecoder {
+    static func decode(
+        kinds: UnsafePointer<UInt8>?,
+        bits: UnsafePointer<UInt64>?,
+        count: Int32
+    ) -> [LLVMInvocationValue]? {
+        guard count >= 0 else {
+            return nil
+        }
+        guard count > 0 else {
+            return []
+        }
+        guard let kinds, let bits else {
+            return nil
+        }
+
+        var arguments: [LLVMInvocationValue] = []
+        arguments.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            switch HotfixValueKind(rawValue: kinds[index]) {
+            case .int:
+                arguments.append(.int(Int(bitPattern: UInt(bits[index]))))
+            case .bool:
+                guard bits[index] <= 1 else {
+                    return nil
+                }
+                arguments.append(.bool(bits[index] == 1))
+            case .void, .none:
+                return nil
+            }
+        }
+        return arguments
+    }
+}
+
+nonisolated enum HotfixResultEncoder {
+    static func encode(
+        _ result: LLVMInvocationResult,
+        to resultBits: UnsafeMutablePointer<UInt64>?
+    ) -> Bool {
+        switch result {
+        case let .int(value):
+            guard let resultBits else {
+                return false
+            }
+            resultBits.pointee = UInt64(truncatingIfNeeded: value)
+            return true
+        case let .bool(value):
+            guard let resultBits else {
+                return false
+            }
+            resultBits.pointee = value ? 1 : 0
+            return true
+        case .void:
+            return true
+        case .pointer:
+            return false
+        }
+    }
+}
+
+nonisolated enum HotfixBridgeRuntime {
+    private final class Storage: @unchecked Sendable {
+        let lock = NSRecursiveLock()
+        var runtime = HotfixRuntime.shared
+    }
+
+    private static let storage = Storage()
+
+    static var current: HotfixRuntime {
+        storage.lock.lock()
+        defer { storage.lock.unlock() }
+        return storage.runtime
+    }
+
+    static func withRuntimeForTesting<T>(
+        _ runtime: HotfixRuntime,
+        perform body: () throws -> T
+    ) rethrows -> T {
+        storage.lock.lock()
+        let previous = storage.runtime
+        storage.runtime = runtime
+        defer {
+            storage.runtime = previous
+            storage.lock.unlock()
+        }
+        return try body()
+    }
+}
+
+@_cdecl("ir_hotfix_invoke")
+nonisolated func ir_hotfix_invoke(
+    _ targetID: UInt64,
+    _ signatureID: UInt64,
+    _ argumentKinds: UnsafePointer<UInt8>?,
+    _ argumentBits: UnsafePointer<UInt64>?,
+    _ argumentCount: Int32,
+    _ receiver: UnsafeRawPointer?,
+    _ resultBits: UnsafeMutablePointer<UInt64>?
+) -> Bool {
+    guard let arguments = HotfixArgumentDecoder.decode(
+        kinds: argumentKinds,
+        bits: argumentBits,
+        count: argumentCount
+    ) else {
+        return false
+    }
+
+    let receiverObject = receiver.map {
+        Unmanaged<AnyObject>.fromOpaque($0).takeUnretainedValue()
+    }
+    guard let result = HotfixBridgeRuntime.current.invoke(
+        targetID: targetID,
+        signatureID: signatureID,
+        arguments: arguments,
+        receiver: receiverObject
+    ) else {
+        return false
+    }
+    return HotfixResultEncoder.encode(result, to: resultBits)
+}
+
 final class HotfixExecutor {
     private let manager: HotfixManager
     private let interpreter: LLVMIRInterpreter

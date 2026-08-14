@@ -522,6 +522,213 @@ struct IRTests {
         #expect(execution.patchID == "patch.v1")
     }
 
+    @Test func runtimeExecutesMatchingPatch() throws {
+        let suiteName = "ir.hotfix.runtime.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.runtime",
+            targetID: 11,
+            signatureID: 22,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(i64 %value) {
+            entry:
+              %result = add i64 %value, 2
+              ret i64 %result
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+
+        let result = HotfixRuntime(manager: manager).invoke(
+            targetID: 11,
+            signatureID: 22,
+            arguments: [.int(40)],
+            receiver: nil
+        )
+
+        #expect(result == .int(42))
+    }
+
+    @Test func runtimeFallsBackForSignatureMismatch() throws {
+        let suiteName = "ir.hotfix.runtime.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.signature",
+            targetID: 11,
+            signatureID: 22,
+            entryFunction: "patch",
+            ir: "define i64 @patch(i64 %value) { ret i64 %value }"
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+        let runtime = HotfixRuntime(manager: manager)
+
+        #expect(runtime.invoke(targetID: 11, signatureID: 23, arguments: [.int(40)], receiver: nil) == nil)
+        #expect(runtime.invoke(targetID: 12, signatureID: 22, arguments: [.int(40)], receiver: nil) == nil)
+    }
+
+    @Test func runtimeFallsBackForInvalidIR() throws {
+        let suiteName = "ir.hotfix.runtime.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.invalid",
+            targetID: 11,
+            signatureID: 22,
+            entryFunction: "patch",
+            ir: "not llvm ir"
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+
+        let result = HotfixRuntime(manager: manager).invoke(
+            targetID: 11,
+            signatureID: 22,
+            arguments: [.int(40)],
+            receiver: nil
+        )
+
+        #expect(result == nil)
+    }
+
+    @Test func recursionGuardRejectsOnlyActiveTarget() {
+        let guardState = HotfixRecursionGuard()
+
+        #expect(guardState.enter(10))
+        #expect(!guardState.enter(10))
+        #expect(guardState.enter(11))
+
+        guardState.leave(11)
+        guardState.leave(10)
+        #expect(guardState.enter(10))
+        guardState.leave(10)
+    }
+
+    @Test func runtimePassesSyntheticPointerAndReceiverHost() throws {
+        let suiteName = "ir.hotfix.runtime.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.receiver",
+            targetID: 11,
+            signatureID: 22,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(ptr %self, i64 %value) {
+            entry:
+              %selfBits = ptrtoint ptr %self to i64
+              %result = add i64 %selfBits, %value
+              ret i64 %result
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+        let receiver = NSObject()
+
+        let result = HotfixRuntime(manager: manager).invoke(
+            targetID: 11,
+            signatureID: 22,
+            arguments: [.int(42)],
+            receiver: receiver
+        )
+
+        #expect(result == .int(42))
+    }
+
+    @Test func rawCBridgeDecodesAndEncodesSupportedValues() throws {
+        let suiteName = "ir.hotfix.bridge.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patches = [
+            HotfixPatch(
+                id: "patch.bridge.int",
+                targetID: 11,
+                signatureID: 22,
+                entryFunction: "patch",
+                ir: """
+                define i64 @patch(i64 %value) {
+                entry:
+                  %result = add i64 %value, 2
+                  ret i64 %result
+                }
+                """
+            ),
+            HotfixPatch(
+                id: "patch.bridge.bool",
+                targetID: 12,
+                signatureID: 23,
+                entryFunction: "patch",
+                ir: """
+                define i1 @patch(i1 %value) {
+                entry:
+                  ret i1 %value
+                }
+                """
+            ),
+            HotfixPatch(
+                id: "patch.bridge.void",
+                targetID: 13,
+                signatureID: 24,
+                entryFunction: "patch",
+                ir: """
+                define void @patch() {
+                entry:
+                  ret void
+                }
+                """
+            )
+        ]
+        for patch in patches {
+            manager.upsert(patch)
+            try manager.activatePatch(id: patch.id)
+        }
+        let runtime = HotfixRuntime(manager: manager)
+        let previousRuntime = HotfixBridgeRuntime.current
+
+        HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            var intKind: UInt8 = 1
+            var intBits: UInt64 = 40
+            var intResult: UInt64 = 0
+            #expect(ir_hotfix_invoke(11, 22, &intKind, &intBits, 1, nil, &intResult))
+            #expect(intResult == 42)
+
+            var boolKind: UInt8 = 2
+            var boolBits: UInt64 = 1
+            var boolResult: UInt64 = 0
+            #expect(ir_hotfix_invoke(12, 23, &boolKind, &boolBits, 1, nil, &boolResult))
+            #expect(boolResult == 1)
+
+            #expect(ir_hotfix_invoke(13, 24, nil, nil, 0, nil, nil))
+
+            var unknownKind: UInt8 = 99
+            var voidKind: UInt8 = 3
+            var malformedBits: UInt64 = 0
+            #expect(!ir_hotfix_invoke(11, 22, nil, &malformedBits, 1, nil, &intResult))
+            #expect(!ir_hotfix_invoke(11, 22, &intKind, nil, 1, nil, &intResult))
+            #expect(!ir_hotfix_invoke(11, 22, &unknownKind, &malformedBits, 1, nil, &intResult))
+            #expect(!ir_hotfix_invoke(11, 22, &voidKind, &malformedBits, 1, nil, &intResult))
+            #expect(!ir_hotfix_invoke(11, 22, &intKind, &intBits, -1, nil, &intResult))
+            #expect(!ir_hotfix_invoke(11, 22, &intKind, &intBits, 1, nil, nil))
+
+            var invalidBoolBits: UInt64 = 2
+            #expect(!ir_hotfix_invoke(12, 23, &boolKind, &invalidBoolBits, 1, nil, &boolResult))
+
+            var pointerResult: UInt64 = 0
+            #expect(!HotfixResultEncoder.encode(.pointer(1), to: &pointerResult))
+        }
+        #expect(HotfixBridgeRuntime.current === previousRuntime)
+    }
+
     @Test func managerActivatesPatchByTargetID() throws {
         let suiteName = "ir.hotfix.tests.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
