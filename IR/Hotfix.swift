@@ -114,6 +114,9 @@ nonisolated final class HotfixManager: @unchecked Sendable {
         defer { lock.unlock() }
 
         var candidate = state
+        candidate.activePatchIDByTarget = candidate.activePatchIDByTarget.filter {
+            $0.value != patch.id
+        }
         candidate.patchesByID[patch.id] = patch
         publish(candidate)
     }
@@ -141,10 +144,12 @@ nonisolated final class HotfixManager: @unchecked Sendable {
 
     func activePatch(for targetID: UInt64) -> HotfixPatch? {
         let snapshot = currentSnapshot()
-        guard let patchID = snapshot.activePatchIDByTarget[targetID] else {
+        guard let patchID = snapshot.activePatchIDByTarget[targetID],
+              let patch = snapshot.patchesByID[patchID],
+              patch.targetID == targetID else {
             return nil
         }
-        return snapshot.patchesByID[patchID]
+        return patch
     }
 
     func deactivatePatch(for patchPoint: String) {

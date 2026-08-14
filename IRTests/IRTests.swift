@@ -571,6 +571,38 @@ struct IRTests {
         #expect(manager.activePatch(for: second.targetID) == second)
     }
 
+    @Test func managerRetargetingPatchDeactivatesOldTarget() throws {
+        let suiteName = "ir.hotfix.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let original = HotfixPatch(
+            id: "patch.retargeted",
+            targetID: 501,
+            signatureID: 601,
+            entryFunction: "original",
+            ir: "original IR"
+        )
+        let replacement = HotfixPatch(
+            id: original.id,
+            targetID: 502,
+            signatureID: 602,
+            entryFunction: "replacement",
+            ir: "replacement IR"
+        )
+        manager.upsert(original)
+        try manager.activatePatch(id: original.id)
+
+        manager.upsert(replacement)
+
+        #expect(manager.activePatch(for: original.targetID) == nil)
+        #expect(manager.activePatch(for: replacement.targetID) == nil)
+
+        try manager.activatePatch(id: replacement.id)
+
+        #expect(manager.activePatch(for: replacement.targetID) == replacement)
+    }
+
     @Test func fnv1a64UsesStandardOffsetBasisForEmptyInput() {
         #expect(HotfixID.fnv1a64("") == 14_695_981_039_346_656_037)
     }
