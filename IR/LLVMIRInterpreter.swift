@@ -29,6 +29,17 @@ nonisolated private func llvmStableSymbolAddress(_ symbol: String) -> Int {
     return 2_000_000 + abs(hash % 1_000_000)
 }
 
+#if canImport(UIKit)
+nonisolated private func withUIKitOnMainActor<T: Sendable>(
+    _ body: @MainActor () throws -> T
+) throws -> T {
+    guard Thread.isMainThread else {
+        throw LLVMIRInterpreterError.runtime("UIKit bridge requires the main thread.")
+    }
+    return try MainActor.assumeIsolated(body)
+}
+#endif
+
 // The host is borrowed weakly and read only during a synchronous interpreter invocation.
 nonisolated final class LLVMHostContext: @unchecked Sendable {
     weak var rootObject: AnyObject?
@@ -670,8 +681,10 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         let y = CGFloat(try scalarFromValue(arguments[1]))
         let w = CGFloat(try scalarFromValue(arguments[2]))
         let h = CGFloat(try scalarFromValue(arguments[3]))
-        let view = UIView(frame: CGRect(x: x, y: y, width: w, height: h))
-        return .pointer(state.registerObject(view))
+        return try withUIKitOnMainActor {
+            let view = UIView(frame: CGRect(x: x, y: y, width: w, height: h))
+            return .pointer(state.registerObject(view))
+        }
 #else
         return .pointer(state.allocateExternalPointer())
 #endif
@@ -684,58 +697,60 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         host: LLVMHostContext?
     ) throws -> LLVMValue? {
 #if canImport(UIKit)
-        guard arguments.count >= 2 else {
-            return defaultExternalReturnValue(for: declaredReturnType, state: state)
-        }
-
-        let receiver = arguments[0]
-        let selectorValue = arguments[1]
-        guard case let .pointer(selectorAddress) = selectorValue,
-              let selector = state.selectorName(for: selectorAddress) else {
-            // Fallback for selector encoding mismatches (\01, escaped variants, etc.).
-            return try executeObjcMessageSendHeuristic(
-                receiver: receiver,
-                arguments: arguments,
-                declaredReturnType: declaredReturnType,
-                state: state,
-                host: host
-            )
-        }
-
-        let receiverObject = resolveReceiverObject(receiver, state: state, host: host)
-
-        switch selector {
-        case "redColor":
-            let color = UIColor.red
-            return .pointer(state.registerObject(color))
-        case "setBackgroundColor:":
-            if let view = receiverObject as? UIView,
-               arguments.count >= 3,
-               let color = state.object(for: arguments[2]) as? UIColor {
-                view.backgroundColor = color
+        return try withUIKitOnMainActor {
+            guard arguments.count >= 2 else {
+                return defaultExternalReturnValue(for: declaredReturnType, state: state)
             }
-            return nil
-        case "view":
-            if let vc = receiverObject as? UIViewController {
-                return .pointer(state.registerObject(vc.view))
+
+            let receiver = arguments[0]
+            let selectorValue = arguments[1]
+            guard case let .pointer(selectorAddress) = selectorValue,
+                  let selector = state.selectorName(for: selectorAddress) else {
+                // Fallback for selector encoding mismatches (\01, escaped variants, etc.).
+                return try executeObjcMessageSendHeuristic(
+                    receiver: receiver,
+                    arguments: arguments,
+                    declaredReturnType: declaredReturnType,
+                    state: state,
+                    host: host
+                )
             }
-            return defaultExternalReturnValue(for: declaredReturnType, state: state)
-        case "addSubview:":
-            if let view = receiverObject as? UIView,
-               arguments.count >= 3,
-               let child = state.object(for: arguments[2]) as? UIView {
-                view.addSubview(child)
-                print("[LLVMBridge] addSubview executed, child frame: \(child.frame)")
+
+            let receiverObject = resolveReceiverObject(receiver, state: state, host: host)
+
+            switch selector {
+            case "redColor":
+                let color = UIColor.red
+                return .pointer(state.registerObject(color))
+            case "setBackgroundColor:":
+                if let view = receiverObject as? UIView,
+                   arguments.count >= 3,
+                   let color = state.object(for: arguments[2]) as? UIColor {
+                    view.backgroundColor = color
+                }
+                return nil
+            case "view":
+                if let vc = receiverObject as? UIViewController {
+                    return .pointer(state.registerObject(vc.view))
+                }
+                return defaultExternalReturnValue(for: declaredReturnType, state: state)
+            case "addSubview:":
+                if let view = receiverObject as? UIView,
+                   arguments.count >= 3,
+                   let child = state.object(for: arguments[2]) as? UIView {
+                    view.addSubview(child)
+                    print("[LLVMBridge] addSubview executed, child frame: \(child.frame)")
+                }
+                return nil
+            default:
+                return try executeObjcMessageSendHeuristic(
+                    receiver: receiver,
+                    arguments: arguments,
+                    declaredReturnType: declaredReturnType,
+                    state: state,
+                    host: host
+                )
             }
-            return nil
-        default:
-            return try executeObjcMessageSendHeuristic(
-                receiver: receiver,
-                arguments: arguments,
-                declaredReturnType: declaredReturnType,
-                state: state,
-                host: host
-            )
         }
 #else
         return defaultExternalReturnValue(for: declaredReturnType, state: state)
@@ -750,32 +765,36 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         host: LLVMHostContext?
     ) throws -> LLVMValue? {
 #if canImport(UIKit)
-        let receiverObject = resolveReceiverObject(receiver, state: state, host: host)
+        return try withUIKitOnMainActor {
+            let receiverObject = resolveReceiverObject(receiver, state: state, host: host)
 
-        // UIColor.red class-style getter.
-        if arguments.count == 2, case let .pointer(addr) = receiver, state.isUIColorClassAddress(addr) {
-            let color = UIColor.red
-            return .pointer(state.registerObject(color))
-        }
-
-        // UIViewController.view getter.
-        if arguments.count == 2, let vc = receiverObject as? UIViewController {
-            return .pointer(state.registerObject(vc.view))
-        }
-
-        if arguments.count >= 3, let view = receiverObject as? UIView {
-            if let color = state.object(for: arguments[2]) as? UIColor {
-                view.backgroundColor = color
-                return nil
+            // UIColor.red class-style getter.
+            if arguments.count == 2, case let .pointer(addr) = receiver, state.isUIColorClassAddress(addr) {
+                let color = UIColor.red
+                return .pointer(state.registerObject(color))
             }
-            if let child = state.object(for: arguments[2]) as? UIView {
-                view.addSubview(child)
-                print("[LLVMBridge] heuristic addSubview executed, child frame: \(child.frame)")
-                return nil
+
+            // UIViewController.view getter.
+            if arguments.count == 2, let vc = receiverObject as? UIViewController {
+                return .pointer(state.registerObject(vc.view))
             }
+
+            if arguments.count >= 3, let view = receiverObject as? UIView {
+                if let color = state.object(for: arguments[2]) as? UIColor {
+                    view.backgroundColor = color
+                    return nil
+                }
+                if let child = state.object(for: arguments[2]) as? UIView {
+                    view.addSubview(child)
+                    print("[LLVMBridge] heuristic addSubview executed, child frame: \(child.frame)")
+                    return nil
+                }
+            }
+            return defaultExternalReturnValue(for: declaredReturnType, state: state)
         }
-#endif
+#else
         return defaultExternalReturnValue(for: declaredReturnType, state: state)
+#endif
     }
 
     private func resolveReceiverObject(
@@ -808,7 +827,8 @@ private nonisolated struct LLVMModule {
     let functions: [String: LLVMFunction]
 }
 
-private nonisolated final class LLVMRuntimeState {
+// Each instance is confined to one synchronous interpreter invocation.
+private nonisolated final class LLVMRuntimeState: @unchecked Sendable {
     var memory: [Int: LLVMValue] = [:]
     var nextAddress = 1
     private var nextExternalAddress = 1_000_000
@@ -964,7 +984,7 @@ private nonisolated enum LLVMOperand {
     case local(String)
 }
 
-private nonisolated enum LLVMValue {
+private nonisolated enum LLVMValue: Sendable {
     case int(Int)
     case bool(Bool)
     case pointer(Int)

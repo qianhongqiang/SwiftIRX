@@ -29,6 +29,23 @@ private final class SynchronizedFailureFlag: @unchecked Sendable {
     }
 }
 
+private final class SynchronizedBridgeResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invocation: (invoked: Bool, bits: UInt64)?
+
+    func record(invoked: Bool, bits: UInt64) {
+        lock.lock()
+        invocation = (invoked, bits)
+        lock.unlock()
+    }
+
+    var value: (invoked: Bool, bits: UInt64)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return invocation
+    }
+}
+
 struct IRTests {
 
     @Test func interpretNamedFunctionWithTypedArguments() throws {
@@ -844,6 +861,66 @@ struct IRTests {
         #expect(invoked)
         #expect(result == 42)
         #expect(receiver.view.backgroundColor?.isEqual(UIColor.red) == true)
+    }
+
+    @MainActor
+    @Test func rawCBridgeRejectsUIKitReceiverPatchOffMainThread() throws {
+        let suiteName = "ir.hotfix.bridge.background-receiver.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.bridge.background-receiver",
+            targetID: 16,
+            signatureID: 27,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(ptr %self) {
+            entry:
+              %viewSelector = load ptr, ptr @"\\01L_selector(view)"
+              %view = call ptr @objc_msgSend(ptr %self, ptr %viewSelector)
+              %colorClass = load ptr, ptr @"OBJC_CLASS_REF_$_UIColor"
+              %colorMeta = call ptr @objc_opt_self(ptr %colorClass)
+              %redSelector = load ptr, ptr @"\\01L_selector(redColor)"
+              %red = call ptr @objc_msgSend(ptr %colorMeta, ptr %redSelector)
+              %backgroundSelector = load ptr, ptr @"\\01L_selector(setBackgroundColor:)"
+              call void @objc_msgSend(ptr %view, ptr %backgroundSelector, ptr %red)
+              ret i64 42
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+        let receiver = UIViewController()
+        _ = receiver.view
+        let receiverAddress = UInt(bitPattern: Unmanaged.passUnretained(receiver).toOpaque())
+        let result = SynchronizedBridgeResult()
+        let finished = DispatchSemaphore(value: 0)
+        let runtime = HotfixRuntime(manager: manager)
+
+        let worker = Thread {
+            var resultBits: UInt64 = 0
+            let invoked = HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+                ir_hotfix_invoke(
+                    16,
+                    27,
+                    nil,
+                    nil,
+                    0,
+                    UnsafeRawPointer(bitPattern: receiverAddress),
+                    &resultBits
+                )
+            }
+            result.record(invoked: invoked, bits: resultBits)
+            finished.signal()
+        }
+        worker.qualityOfService = .userInteractive
+        worker.start()
+        #expect(finished.wait(timeout: .now() + 5) == .success)
+
+        #expect(result.value?.invoked == false)
+        #expect(result.value?.bits == 0)
+        #expect(receiver.view.backgroundColor == nil)
     }
 #endif
 
