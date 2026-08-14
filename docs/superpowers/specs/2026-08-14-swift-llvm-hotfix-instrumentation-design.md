@@ -32,24 +32,25 @@ Every skipped definition must have an explicit reason available from the pass di
 
 ## Build Architecture
 
-The installed Xcode 26.3 Swift 6.2.4 driver supports `-load-pass-plugin=<path>`. The first version therefore loads an LLVM New Pass Manager plugin directly through `OTHER_SWIFT_FLAGS` instead of replacing the full Swift driver.
+The pass is built against Homebrew LLVM 19.1.7 and runs inside that release's `opt`. It is intentionally not loaded into Apple `swift-frontend`: the frontend does not export the complete LLVM C++ ABI required by a transformation pass, and direct loading was verified to fail once the pass used cloning and IR construction APIs.
 
-The plugin is built out of band with CMake against LLVM headers pinned to the LLVM major version embedded in the selected Xcode toolchain. The plugin build records the expected Swift frontend and LLVM plugin API versions. Xcode integration validates those versions before adding the load flag and fails with a clear build diagnostic on a mismatch instead of loading an ABI-incompatible C++ plugin.
+Apple Swift 6.2.4 emits LLVM bitcode to a file boundary. A `swiftc` wrapper then invokes Homebrew `opt` with the named `hotfix-instrument` pipeline before continuing object emission. Integration validates the exact Swift and Homebrew LLVM versions before crossing that boundary.
 
 The compilation flow is:
 
 ```text
 Swift source
   -> Swift AST and SIL
-  -> LLVM IR
-  -> HotfixInstrumentationPass
-  -> normal LLVM optimization and object emission
+  -> Apple Swift LLVM bitcode
+  -> Homebrew opt + HotfixInstrumentationPass
+  -> transformed LLVM bitcode
+  -> object emission
   -> Mach-O link
 ```
 
-The plugin registers at the beginning of the LLVM optimization pipeline so it sees functions before normal inlining and dead-code elimination. The trampoline is marked `noinline`; the private original clone remains eligible for normal optimization.
+The named pipeline gives the wrapper an explicit transformation boundary. The pass also registers at pipeline start for ordinary Homebrew `opt` pipelines. Both the trampoline and private original clone are marked `noinline` so fallback symbols survive subsequent optimization.
 
-Only the app target loads the pass. Runtime and interpreter source files are excluded through a pass ignore list. A later `swiftc` wrapper may centralize plugin discovery, Xcode version checks, and compiler arguments, but it is not required for the first end-to-end implementation.
+Only app-target bitcode is transformed. Runtime and interpreter source files are excluded through a pass ignore list. The wrapper centralizes plugin discovery, toolchain checks, and compiler arguments.
 
 ## LLVM Transformation
 
@@ -190,7 +191,7 @@ Planned responsibilities:
 - `IR/Hotfix.swift`: patch persistence, activation, thread-safe snapshots, invocation service, and the C bridge.
 - `IR/LLVMIRInterpreter.swift`: general typed entry execution and host receiver handling.
 - `IRTests/IRTests.swift`: interpreter and runtime behavior tests.
-- Xcode project settings: build the plugin before Swift compilation and load it only in the intended configuration.
+- Xcode project settings and wrapper: build the plugin and transform app bitcode only in the intended configuration.
 
 The first integration enables the pass in Debug. Release remains unchanged until the fixture and app test suites establish toolchain compatibility.
 
@@ -224,7 +225,7 @@ Pass tests compile or transform small LLVM IR fixtures and assert:
 - Runtime declarations and generated clones are not reinstrumented.
 - Descriptor records are emitted.
 
-The final integration test builds a Swift fixture with the loaded plugin, inspects the emitted IR, and runs an app-side function before and after activating a patch.
+The final integration test emits Swift bitcode, transforms it with Homebrew `opt`, inspects the emitted IR, and runs an app-side function before and after activating a patch.
 
 ## Success Criteria
 

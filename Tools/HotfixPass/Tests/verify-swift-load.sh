@@ -5,13 +5,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
 FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
-TOOLCHAIN="$ROOT/Tools/HotfixPass/.toolchain/swift-llvm-project"
-SWIFT_LLVM_COMMIT="8f0d2ca924db37c8f8161d55c21b9097b05b72f3"
-OUTPUT_BASE="$(mktemp "${TMPDIR:-/tmp}/hotfix-pass.XXXXXX")"
-OUTPUT="$OUTPUT_BASE.ll.tmp"
+LLVM_ROOT="/opt/homebrew/opt/llvm@19/bin"
+TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-swift-bitcode.XXXXXX")"
 
 cleanup() {
-  rm -f "$OUTPUT_BASE" "$OUTPUT"
+  rm -rf "$TEMP"
 }
 trap cleanup EXIT
 
@@ -26,41 +24,9 @@ if [[ "$SWIFT_IDENTITY" != "$EXPECTED_SWIFT_IDENTITY" ]]; then
   exit 1
 fi
 
-LLVM_CONFIG="/opt/homebrew/opt/llvm@19/bin/llvm-config"
-LLVM_VERSION="$($LLVM_CONFIG --version)"
+LLVM_VERSION="$($LLVM_ROOT/llvm-config --version)"
 if [[ "$LLVM_VERSION" != "19.1.7" ]]; then
   echo "error: expected Homebrew LLVM 19.1.7, found $LLVM_VERSION" >&2
-  exit 1
-fi
-
-PINNED_REVISION="$(git -C "$TOOLCHAIN" rev-parse HEAD 2>/dev/null || true)"
-if [[ "$PINNED_REVISION" != "$SWIFT_LLVM_COMMIT" ]]; then
-  echo "error: expected Swift LLVM commit $SWIFT_LLVM_COMMIT" >&2
-  echo "error: configure the plugin to bootstrap its pinned headers" >&2
-  exit 1
-fi
-
-PINNED_STATUS="$(
-  git -C "$TOOLCHAIN" status --porcelain=v1 --untracked-files=all
-)"
-if [[ -n "$PINNED_STATUS" ]]; then
-  echo "error: Swift LLVM cache must be pristine" >&2
-  echo "$PINNED_STATUS" >&2
-  exit 1
-fi
-
-VERSION_FILE="$TOOLCHAIN/cmake/Modules/LLVMVersion.cmake"
-llvm_version_part() {
-  local part="$1"
-  sed -nE \
-    "s/^[[:space:]]*set\\(LLVM_VERSION_${part} ([0-9]+)\\)[[:space:]]*$/\\1/p" \
-    "$VERSION_FILE"
-}
-
-if [[ "$(llvm_version_part MAJOR)" != "19" ||
-      "$(llvm_version_part MINOR)" != "1" ||
-      "$(llvm_version_part PATCH)" != "5" ]]; then
-  echo "error: pinned Swift LLVM headers are not version 19.1.5" >&2
   exit 1
 fi
 
@@ -71,10 +37,22 @@ fi
 
 xcrun swiftc \
   -O \
-  -emit-ir \
+  -emit-bc \
   -parse-as-library \
-  -load-pass-plugin="$PLUGIN" \
   "$FIXTURE" \
-  -o "$OUTPUT"
+  -o "$TEMP/input.bc"
 
-grep -Fq "hotfix-pass-loaded" "$OUTPUT"
+"$LLVM_ROOT/opt" \
+  -load-pass-plugin "$PLUGIN" \
+  -passes=hotfix-instrument \
+  -verify-each \
+  "$TEMP/input.bc" \
+  -o "$TEMP/transformed.bc"
+
+"$LLVM_ROOT/llvm-dis" \
+  "$TEMP/transformed.bc" \
+  -o "$TEMP/transformed.ll"
+
+grep -Fq "hotfix-pass-loaded" "$TEMP/transformed.ll"
+grep -Fq "ir_hotfix_invoke" "$TEMP/transformed.ll"
+grep -Fq ".hotfix_original" "$TEMP/transformed.ll"

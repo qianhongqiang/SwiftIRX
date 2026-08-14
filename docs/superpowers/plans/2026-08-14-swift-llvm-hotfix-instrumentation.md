@@ -4,9 +4,9 @@
 
 **Goal:** Automatically instrument eligible Swift app functions with an LLVM pass so an active interpreted LLVM IR patch can replace the result while every failure falls back to the original native body.
 
-**Architecture:** A loadable LLVM New Pass Manager plugin clones each supported `swiftcc` function and replaces its original body with a C ABI runtime dispatch trampoline. The Swift runtime validates the target/signature pair, marshals scalar arguments into the existing interpreter, and returns a typed result or tells the trampoline to call the native clone.
+**Architecture:** A Homebrew LLVM New Pass Manager plugin transforms bitcode emitted by Apple Swift at a file boundary. It clones each supported `swiftcc` function and replaces its original body with a C ABI runtime dispatch trampoline. The Swift runtime validates the target/signature pair, marshals scalar arguments into the existing interpreter, and returns a typed result or tells the trampoline to call the native clone.
 
-**Tech Stack:** Swift 6.2, Swift Testing, C++20, Swift LLVM 19.1.5 New Pass Manager, CMake, Xcode 26.3, Mach-O.
+**Tech Stack:** Swift 6.2, Swift Testing, C++20, Homebrew LLVM 19.1.7 New Pass Manager, CMake, Xcode 26.3, Mach-O.
 
 ---
 
@@ -15,29 +15,27 @@
 - Create `Tools/HotfixPass/CMakeLists.txt`: build the version-pinned loadable pass plugin.
 - Create `Tools/HotfixPass/Sources/HotfixPass.cpp`: eligibility, cloning, trampoline generation, diagnostics, and plugin registration.
 - Create `Tools/HotfixPass/Tests/fixtures/scalars.ll`: deterministic LLVM fixture for integer, boolean, void, and skip behavior.
-- Create `Tools/HotfixPass/Tests/fixtures/swift_fixture.swift`: actual Swift frontend compatibility fixture.
+- Create `Tools/HotfixPass/Tests/fixtures/swift_fixture.swift`: Apple Swift bitcode compatibility fixture.
 - Create `Tools/HotfixPass/Tests/run-pass-tests.sh`: build/load/transform assertions.
-- Create `Tools/HotfixPass/Tests/verify-swift-load.sh`: Xcode Swift frontend smoke test.
+- Create `Tools/HotfixPass/Tests/verify-swift-load.sh`: Swift-bitcode-to-Homebrew-`opt` smoke test.
 - Create `.gitignore`: exclude CMake, plugin, object, and emitted-IR artifacts.
 - Modify `IR/LLVMIRInterpreter.swift`: typed named-entry execution API.
 - Modify `IR/Hotfix.swift`: target/signature patch model, thread-safe registry, runtime invocation, recursion guard, and C bridge.
 - Create `IR/HotfixDemo.swift`: small supported functions used by app integration and emitted-IR inspection.
 - Modify `IR/ViewController.swift`: activate/deactivate an actual function patch instead of manually running fallback IR.
 - Modify `IRTests/IRTests.swift`: interpreter, registry, runtime, bridge, and integration tests.
-- Modify `IR.xcodeproj/project.pbxproj`: Debug-only plugin build phase and `-load-pass-plugin` flag.
+- Modify `IR.xcodeproj/project.pbxproj`: Debug-only plugin build phase and `swiftc` wrapper integration.
 - Create `Tools/HotfixPass/README.md`: pinned toolchain, build, test, patch ABI, and skip rules.
 
 ## Task 1: Prove LLVM Plugin Compatibility
 
-> **Compatibility correction (2026-08-14):** Although Xcode 26.3's frontend
-> reports `LLVM version 17.0.0`, Apple Swift 6.2.4 is built from the
-> `swiftlang/llvm-project` `swift-6.2.4-RELEASE` tag, whose pinned commit
-> `8f0d2ca924db37c8f8161d55c21b9097b05b72f3` declares LLVM 19.1.5. A plugin
-> compiled against Homebrew LLVM 17 loads but crashes in
-> `llvm::GlobalVariable::GlobalVariable` because the C++ IR layouts differ.
-> `Tools/HotfixPass/CMakeLists.txt` is authoritative: it sparsely bootstraps
-> that exact Swift LLVM header revision, generates its tables with Homebrew
-> LLVM 19, and rejects any mismatched frontend, source revision, or package.
+> **Compatibility correction (2026-08-15):** Direct frontend loading is not
+> the supported architecture. Apple `swift-frontend` does not export all LLVM
+> C++ symbols needed by cloning and IR construction, even when the plugin uses
+> matching Swift LLVM headers. The full plugin is compiled against Homebrew
+> LLVM 19.1.7 and runs in Homebrew `opt` on Apple Swift-emitted bitcode. The
+> historical direct-load steps below are superseded by this file-boundary test;
+> Task 7 provides the production `swiftc` wrapper.
 
 **Files:**
 - Create: `.gitignore`
@@ -810,7 +808,7 @@ Do not diagnose external declarations, LLVM intrinsics, runtime bridge symbols, 
 
 - [ ] **Step 6: Run both pass suites and verify GREEN**
 
-Expected: scalar, receiver, descriptor, diagnostic, and Swift frontend checks PASS.
+Expected: scalar, receiver, descriptor, diagnostic, and Swift bitcode checks PASS.
 
 - [ ] **Step 7: Commit**
 
@@ -819,7 +817,7 @@ git add Tools/HotfixPass
 git commit -m "feat: describe instrumented Swift methods"
 ```
 
-## Task 7: Integrate the Plugin With the App
+## Task 7: Integrate the Bitcode Transformer With the App
 
 **Files:**
 - Create: `IR/HotfixDemo.swift`
@@ -879,15 +877,15 @@ cp "$SRCROOT/Tools/HotfixPass/.build/libHotfixPass.dylib" \
 
 Declare the dylib as the phase output and disable user script sandboxing only for the app target because CMake needs its build directory.
 
-- [ ] **Step 4: Load the pass in Debug only**
+- [ ] **Step 4: Route Debug compilation through the wrapper**
 
-Set the app target Debug configuration:
+Set the app target Debug configuration to the wrapper implemented for the file-boundary pipeline:
 
 ```text
-OTHER_SWIFT_FLAGS = $(inherited) -load-pass-plugin=$(DERIVED_FILE_DIR)/HotfixPassProduct/libHotfixPass.dylib
+SWIFT_EXEC = $(SRCROOT)/Tools/HotfixPass/swiftc-hotfix
 ```
 
-Leave Release unchanged. Add pass ignore options for `Hotfix.swift` and `LLVMIRInterpreter.swift` through plugin command-line options or compiled defaults.
+Leave Release unchanged. The wrapper emits Apple Swift bitcode, invokes Homebrew `opt` with `-passes=hotfix-instrument`, and resumes object emission. Add pass ignore options for `Hotfix.swift` and `LLVMIRInterpreter.swift` through plugin command-line options or compiled defaults.
 
 - [ ] **Step 5: Replace the manual ViewController demo**
 
@@ -902,9 +900,12 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   CODE_SIGNING_ALLOWED=NO
 
-xcrun swiftc -O -emit-ir \
+xcrun swiftc -O -emit-bc -parse-as-library \
+  IR/HotfixDemo.swift -o /tmp/HotfixDemo.input.bc
+/opt/homebrew/opt/llvm@19/bin/opt \
   -load-pass-plugin=Tools/HotfixPass/.build/libHotfixPass.dylib \
-  IR/HotfixDemo.swift -o /tmp/HotfixDemo.instrumented.ll
+  -passes=hotfix-instrument -S /tmp/HotfixDemo.input.bc \
+  -o /tmp/HotfixDemo.instrumented.ll
 rg 'ir_hotfix_invoke|hotfix_original|__DATA,__hotfix' \
   /tmp/HotfixDemo.instrumented.ll
 ```
