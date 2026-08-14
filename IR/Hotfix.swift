@@ -305,7 +305,7 @@ nonisolated enum HotfixResultEncoder {
             resultBits.pointee = value ? 1 : 0
             return true
         case .void:
-            return true
+            return resultBits == nil
         case .pointer:
             return false
         }
@@ -373,7 +373,7 @@ nonisolated func ir_hotfix_invoke(
     return HotfixResultEncoder.encode(result, to: resultBits)
 }
 
-final class HotfixExecutor {
+nonisolated final class HotfixExecutor {
     private let manager: HotfixManager
     private let interpreter: LLVMIRInterpreter
 

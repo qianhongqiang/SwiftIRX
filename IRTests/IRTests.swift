@@ -8,6 +8,9 @@
 import Foundation
 import Testing
 @testable import IR
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private final class SynchronizedFailureFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -101,6 +104,60 @@ struct IRTests {
         )
 
         #expect(result == .bool(true))
+    }
+
+    @Test func interpretNamedEntryWrappingAdd() throws {
+        let ir = """
+        define i64 @patch(i64 %value) {
+        entry:
+          %result = add i64 %value, 1
+          ret i64 %result
+        }
+        """
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.int(Int.max)]
+        )
+
+        #expect(result == .int(Int.min))
+    }
+
+    @Test func rejectNamedEntrySignedDivisionOverflow() {
+        let ir = """
+        define i32 @patch(i32 %value) {
+        entry:
+          %result = sdiv i32 %value, -1
+          ret i32 %result
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.self) {
+            try LLVMIRInterpreter().run(
+                ir: ir,
+                function: "patch",
+                arguments: [.int(Int.min)]
+            )
+        }
+    }
+
+    @Test func interpreterRunsAcrossDetachedTaskBoundary() async throws {
+        let interpreter = LLVMIRInterpreter()
+        let result = try await Task.detached {
+            try interpreter.run(
+                ir: """
+                define i64 @patch(i64 %value) {
+                entry:
+                  ret i64 %value
+                }
+                """,
+                function: "patch",
+                arguments: [.int(42)]
+            )
+        }.value
+
+        #expect(result == .int(42))
     }
 
     @Test func rejectMissingNamedFunction() {
@@ -426,6 +483,7 @@ struct IRTests {
         #expect(result == 1)
     }
 
+    @MainActor
     @Test func interpretFullSetupUIProgram() throws {
         let ir = """
         define hidden swiftcc void @"$s14ViewControllerAAC7setupUI33_37ACD668159BB52851391EE68C0B8918LLyyF"(ptr swiftself %0) #0 {
@@ -686,6 +744,19 @@ struct IRTests {
                   ret void
                 }
                 """
+            ),
+            HotfixPatch(
+                id: "patch.bridge.sdiv-overflow",
+                targetID: 14,
+                signatureID: 25,
+                entryFunction: "patch",
+                ir: """
+                define i32 @patch(i32 %value) {
+                entry:
+                  %result = sdiv i32 %value, -1
+                  ret i32 %result
+                }
+                """
             )
         ]
         for patch in patches {
@@ -709,6 +780,10 @@ struct IRTests {
             #expect(boolResult == 1)
 
             #expect(ir_hotfix_invoke(13, 24, nil, nil, 0, nil, nil))
+            #expect(!ir_hotfix_invoke(13, 24, nil, nil, 0, nil, &intResult))
+
+            intBits = UInt64(bitPattern: Int64.min)
+            #expect(!ir_hotfix_invoke(14, 25, &intKind, &intBits, 1, nil, &intResult))
 
             var unknownKind: UInt8 = 99
             var voidKind: UInt8 = 3
@@ -728,6 +803,49 @@ struct IRTests {
         }
         #expect(HotfixBridgeRuntime.current === previousRuntime)
     }
+
+#if canImport(UIKit)
+    @MainActor
+    @Test func rawCBridgePropagatesUnmanagedReceiverToHost() throws {
+        let suiteName = "ir.hotfix.bridge.receiver.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.bridge.receiver",
+            targetID: 15,
+            signatureID: 26,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(ptr %self) {
+            entry:
+              %viewSelector = load ptr, ptr @"\\01L_selector(view)"
+              %view = call ptr @objc_msgSend(ptr %self, ptr %viewSelector)
+              %colorClass = load ptr, ptr @"OBJC_CLASS_REF_$_UIColor"
+              %colorMeta = call ptr @objc_opt_self(ptr %colorClass)
+              %redSelector = load ptr, ptr @"\\01L_selector(redColor)"
+              %red = call ptr @objc_msgSend(ptr %colorMeta, ptr %redSelector)
+              %backgroundSelector = load ptr, ptr @"\\01L_selector(setBackgroundColor:)"
+              call void @objc_msgSend(ptr %view, ptr %backgroundSelector, ptr %red)
+              ret i64 42
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+        let receiver = UIViewController()
+        let receiverPointer = Unmanaged.passUnretained(receiver).toOpaque()
+        var result: UInt64 = 0
+
+        let invoked = HotfixBridgeRuntime.withRuntimeForTesting(HotfixRuntime(manager: manager)) {
+            ir_hotfix_invoke(15, 26, nil, nil, 0, receiverPointer, &result)
+        }
+
+        #expect(invoked)
+        #expect(result == 42)
+        #expect(receiver.view.backgroundColor?.isEqual(UIColor.red) == true)
+    }
+#endif
 
     @Test func managerActivatesPatchByTargetID() throws {
         let suiteName = "ir.hotfix.tests.\(UUID().uuidString)"

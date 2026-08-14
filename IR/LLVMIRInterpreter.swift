@@ -3,25 +3,25 @@ import Foundation
 import UIKit
 #endif
 
-enum LLVMIRInterpreterError: Error, Equatable {
+nonisolated enum LLVMIRInterpreterError: Error, Equatable, Sendable {
     case parse(String)
     case runtime(String)
 }
 
-enum LLVMInvocationValue: Equatable {
+nonisolated enum LLVMInvocationValue: Equatable, Sendable {
     case int(Int)
     case bool(Bool)
     case pointer(Int)
 }
 
-enum LLVMInvocationResult: Equatable {
+nonisolated enum LLVMInvocationResult: Equatable, Sendable {
     case int(Int)
     case bool(Bool)
     case pointer(Int)
     case void
 }
 
-private func llvmStableSymbolAddress(_ symbol: String) -> Int {
+nonisolated private func llvmStableSymbolAddress(_ symbol: String) -> Int {
     var hash = 5381
     for scalar in symbol.unicodeScalars {
         hash = ((hash << 5) &+ hash) &+ Int(scalar.value)
@@ -29,7 +29,8 @@ private func llvmStableSymbolAddress(_ symbol: String) -> Int {
     return 2_000_000 + abs(hash % 1_000_000)
 }
 
-final class LLVMHostContext {
+// The host is borrowed weakly and read only during a synchronous interpreter invocation.
+nonisolated final class LLVMHostContext: @unchecked Sendable {
     weak var rootObject: AnyObject?
 
     init(rootObject: AnyObject?) {
@@ -47,7 +48,7 @@ final class LLVMHostContext {
 #endif
 }
 
-final class LLVMIRInterpreter {
+nonisolated final class LLVMIRInterpreter: Sendable {
     func run(
         ir: String,
         function name: String,
@@ -177,19 +178,22 @@ final class LLVMIRInterpreter {
                 case .phi:
                     continue
                 case let .add(result, lhs, rhs):
-                    let value = try intBinOp(lhs: lhs, rhs: rhs, env: env, +)
+                    let value = try intBinOp(lhs: lhs, rhs: rhs, env: env, &+)
                     env[result] = .int(value)
                 case let .sub(result, lhs, rhs):
-                    let value = try intBinOp(lhs: lhs, rhs: rhs, env: env, -)
+                    let value = try intBinOp(lhs: lhs, rhs: rhs, env: env, &-)
                     env[result] = .int(value)
                 case let .mul(result, lhs, rhs):
-                    let value = try intBinOp(lhs: lhs, rhs: rhs, env: env, *)
+                    let value = try intBinOp(lhs: lhs, rhs: rhs, env: env, &*)
                     env[result] = .int(value)
                 case let .sdiv(result, lhs, rhs):
                     let left = try resolveInt(lhs, env: env)
                     let right = try resolveInt(rhs, env: env)
                     guard right != 0 else {
                         throw LLVMIRInterpreterError.runtime("Division by zero in sdiv.")
+                    }
+                    guard left != Int.min || right != -1 else {
+                        throw LLVMIRInterpreterError.runtime("Signed division overflow in sdiv.")
                     }
                     env[result] = .int(left / right)
                 case let .and(result, type, lhs, rhs):
@@ -800,11 +804,11 @@ final class LLVMIRInterpreter {
     }
 }
 
-private struct LLVMModule {
+private nonisolated struct LLVMModule {
     let functions: [String: LLVMFunction]
 }
 
-private final class LLVMRuntimeState {
+private nonisolated final class LLVMRuntimeState {
     var memory: [Int: LLVMValue] = [:]
     var nextAddress = 1
     private var nextExternalAddress = 1_000_000
@@ -881,29 +885,29 @@ private final class LLVMRuntimeState {
     }
 }
 
-private struct LLVMFunction {
+private nonisolated struct LLVMFunction {
     let name: String
     let returnType: LLVMFunctionReturnType
     let parameters: [LLVMFunctionParameter]
     let blocks: [LLVMBasicBlock]
 }
 
-private struct LLVMFunctionParameter {
+private nonisolated struct LLVMFunctionParameter {
     let name: String
     let type: LLVMType
 }
 
-private struct LLVMBasicBlock {
+private nonisolated struct LLVMBasicBlock {
     let label: String
     let instructions: [LLVMInstruction]
 }
 
-private struct LLVMPhiIncoming {
+private nonisolated struct LLVMPhiIncoming {
     let value: LLVMOperand
     let label: String
 }
 
-private enum LLVMInstruction {
+private nonisolated enum LLVMInstruction {
     case add(result: String, lhs: LLVMOperand, rhs: LLVMOperand)
     case sub(result: String, lhs: LLVMOperand, rhs: LLVMOperand)
     case mul(result: String, lhs: LLVMOperand, rhs: LLVMOperand)
@@ -935,7 +939,7 @@ private enum LLVMInstruction {
     case unreachable
 }
 
-private enum LLVMType {
+private nonisolated enum LLVMType {
     case i8
     case i32
     case i64
@@ -943,7 +947,7 @@ private enum LLVMType {
     case ptr
 }
 
-private enum LLVMICmpPredicate: String {
+private nonisolated enum LLVMICmpPredicate: String {
     case eq
     case ne
     case slt
@@ -952,7 +956,7 @@ private enum LLVMICmpPredicate: String {
     case sge
 }
 
-private enum LLVMOperand {
+private nonisolated enum LLVMOperand {
     case int(Int)
     case bool(Bool)
     case pointer(Int)
@@ -960,7 +964,7 @@ private enum LLVMOperand {
     case local(String)
 }
 
-private enum LLVMValue {
+private nonisolated enum LLVMValue {
     case int(Int)
     case bool(Bool)
     case pointer(Int)
@@ -976,7 +980,7 @@ private enum LLVMValue {
     }
 }
 
-private enum LLVMFunctionReturnType {
+private nonisolated enum LLVMFunctionReturnType {
     case void
     case type(LLVMType)
 
@@ -1004,7 +1008,7 @@ private enum LLVMFunctionReturnType {
     }
 }
 
-private struct LLVMIRParser {
+private nonisolated struct LLVMIRParser {
     func parseModule(ir: String) throws -> LLVMModule {
         let lines = sanitizeLines(ir)
         var index = 0
