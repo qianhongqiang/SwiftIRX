@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
-FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
+FIRST_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
+SECOND_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture_second.swift"
 LLVM_ROOT="/opt/homebrew/opt/llvm@19/bin"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-swift-bitcode.XXXXXX")"
 
@@ -35,24 +36,57 @@ if [[ ! -f "$PLUGIN" ]]; then
   exit 1
 fi
 
-xcrun swiftc \
-  -O \
-  -emit-bc \
-  -parse-as-library \
-  "$FIXTURE" \
-  -o "$TEMP/input.bc"
+transform_swift_module() {
+  local fixture="$1"
+  local module_name="$2"
+  local output_name="$3"
 
-"$LLVM_ROOT/opt" \
-  -load-pass-plugin "$PLUGIN" \
-  -passes=hotfix-instrument \
-  -verify-each \
-  "$TEMP/input.bc" \
-  -o "$TEMP/transformed.bc"
+  xcrun swiftc \
+    -O \
+    -emit-bc \
+    -parse-as-library \
+    -module-name "$module_name" \
+    "$fixture" \
+    -o "$TEMP/$output_name.input.bc"
+
+  "$LLVM_ROOT/opt" \
+    -load-pass-plugin "$PLUGIN" \
+    -passes=hotfix-instrument \
+    -verify-each \
+    "$TEMP/$output_name.input.bc" \
+    -o "$TEMP/$output_name.transformed.bc"
+}
+
+transform_swift_module "$FIRST_FIXTURE" HotfixFixtureOne first
+transform_swift_module "$SECOND_FIXTURE" HotfixFixtureTwo second
 
 "$LLVM_ROOT/llvm-dis" \
-  "$TEMP/transformed.bc" \
-  -o "$TEMP/transformed.ll"
+  "$TEMP/first.transformed.bc" \
+  -o "$TEMP/first.transformed.ll"
+"$LLVM_ROOT/llvm-dis" \
+  "$TEMP/second.transformed.bc" \
+  -o "$TEMP/second.transformed.ll"
+grep -Fq '@hotfix_pass_loaded = private constant' "$TEMP/first.transformed.ll"
+grep -Fq 'hotfix-pass-loaded' "$TEMP/first.transformed.ll"
+grep -Fq '@hotfix_pass_loaded = private constant' "$TEMP/second.transformed.ll"
+grep -Fq 'hotfix-pass-loaded' "$TEMP/second.transformed.ll"
 
-grep -Fq "hotfix-pass-loaded" "$TEMP/transformed.ll"
-grep -Fq "ir_hotfix_invoke" "$TEMP/transformed.ll"
-grep -Fq ".hotfix_original" "$TEMP/transformed.ll"
+"$LLVM_ROOT/llvm-link" \
+  "$TEMP/first.transformed.bc" \
+  "$TEMP/second.transformed.bc" \
+  -o "$TEMP/linked.bc"
+
+"$LLVM_ROOT/llvm-dis" \
+  "$TEMP/linked.bc" \
+  -o "$TEMP/linked.ll"
+
+grep -Fq "HotfixFixtureOne" "$TEMP/linked.ll"
+grep -Fq "HotfixFixtureTwo" "$TEMP/linked.ll"
+if [[ "$(grep -Fc 'call i1 @ir_hotfix_invoke' "$TEMP/linked.ll")" -lt 2 ]]; then
+  echo "error: linked Swift modules did not retain both hotfix trampolines" >&2
+  exit 1
+fi
+if [[ "$(grep -Ec '^define private swiftcc .*hotfix_original' "$TEMP/linked.ll")" -lt 2 ]]; then
+  echo "error: linked Swift modules did not retain both native clones" >&2
+  exit 1
+fi

@@ -79,14 +79,13 @@ bool isEligible(const Function &function) {
 }
 
 void addLoadMarker(Module &module) {
-  if (module.getGlobalVariable("hotfix_pass_loaded") != nullptr)
+  if (module.getGlobalVariable("hotfix_pass_loaded", true) != nullptr)
     return;
 
   Constant *marker = ConstantDataArray::getString(module.getContext(),
                                                   "hotfix-pass-loaded", true);
   new GlobalVariable(module, marker->getType(), true,
-                     GlobalValue::ExternalLinkage, marker,
-                     "hotfix_pass_loaded");
+                     GlobalValue::PrivateLinkage, marker, "hotfix_pass_loaded");
 }
 
 FunctionCallee getRuntimeInvoke(Module &module) {
