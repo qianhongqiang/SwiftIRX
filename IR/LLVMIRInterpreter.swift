@@ -8,6 +8,19 @@ enum LLVMIRInterpreterError: Error, Equatable {
     case runtime(String)
 }
 
+enum LLVMInvocationValue: Equatable {
+    case int(Int)
+    case bool(Bool)
+    case pointer(Int)
+}
+
+enum LLVMInvocationResult: Equatable {
+    case int(Int)
+    case bool(Bool)
+    case pointer(Int)
+    case void
+}
+
 private func llvmStableSymbolAddress(_ symbol: String) -> Int {
     var hash = 5381
     for scalar in symbol.unicodeScalars {
@@ -31,30 +44,66 @@ final class LLVMHostContext {
 }
 
 final class LLVMIRInterpreter {
-    func runMain(ir: String, host: LLVMHostContext? = nil) throws -> Int {
+    func run(
+        ir: String,
+        function name: String,
+        arguments: [LLVMInvocationValue],
+        host: LLVMHostContext? = nil
+    ) throws -> LLVMInvocationResult {
         let module = try LLVMIRParser().parseModule(ir: ir)
-        guard let main = module.functions["main"] else {
-            throw LLVMIRInterpreterError.parse("Missing @main function.")
-        }
-        if !main.parameters.isEmpty {
-            throw LLVMIRInterpreterError.runtime("@main with parameters is unsupported.")
+        guard let function = module.functions[name] else {
+            throw LLVMIRInterpreterError.parse("Missing @\(name) function.")
         }
 
-        let state = LLVMRuntimeState()
-        let result = try execute(function: main, module: module, state: state, arguments: [], host: host)
-        guard let value = result else {
-            throw LLVMIRInterpreterError.runtime("@main returned void, expected i32.")
+        let runtimeArguments = arguments.map { value in
+            switch value {
+            case let .int(value):
+                return LLVMValue.int(value)
+            case let .bool(value):
+                return LLVMValue.bool(value)
+            case let .pointer(value):
+                return LLVMValue.pointer(value)
+            }
         }
+        let result = try execute(
+            function: function,
+            module: module,
+            state: LLVMRuntimeState(),
+            arguments: runtimeArguments,
+            host: host
+        )
 
-        switch value {
-        case let .int(v):
-            return v
-        case let .bool(v):
-            return v ? 1 : 0
+        switch (function.returnType, result) {
+        case (.void, nil):
+            return .void
+        case (.void, .some):
+            throw LLVMIRInterpreterError.runtime("@\(name) returned a value, expected void.")
+        case (.type(.i8), .some(.int(let value))),
+             (.type(.i32), .some(.int(let value))),
+             (.type(.i64), .some(.int(let value))):
+            return .int(value)
+        case (.type(.i1), .some(.bool(let value))):
+            return .bool(value)
+        case (.type(.ptr), .some(.pointer(let value))):
+            return .pointer(value)
+        case (.type, nil):
+            throw LLVMIRInterpreterError.runtime("@\(name) returned void, expected a value.")
+        case (.type, .some):
+            throw LLVMIRInterpreterError.runtime("Return type mismatch in @\(name).")
+        }
+    }
+
+    func runMain(ir: String, host: LLVMHostContext? = nil) throws -> Int {
+        let result = try run(ir: ir, function: "main", arguments: [], host: host)
+        switch result {
+        case let .int(value):
+            return value
+        case let .bool(value):
+            return value ? 1 : 0
         case .pointer:
             throw LLVMIRInterpreterError.runtime("@main returned pointer, expected i32.")
-        case .aggregate:
-            throw LLVMIRInterpreterError.runtime("@main returned aggregate, expected i32.")
+        case .void:
+            throw LLVMIRInterpreterError.runtime("@main returned void, expected i32.")
         }
     }
 

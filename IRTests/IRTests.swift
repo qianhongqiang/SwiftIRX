@@ -5,10 +5,99 @@
 //  Created by hongqiang qian on 2026/3/18.
 //
 
+import Foundation
 import Testing
 @testable import IR
 
 struct IRTests {
+
+    @Test func interpretNamedFunctionWithTypedArguments() throws {
+        let ir = """
+        define i64 @patch(i64 %value, i1 %enabled) {
+        entry:
+          %matches = icmp eq i64 %value, 40
+          %apply = and i1 %matches, %enabled
+          br i1 %apply, label %enabled, label %disabled
+        enabled:
+          ret i64 42
+        disabled:
+          ret i64 %value
+        }
+        """
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.int(40), .bool(true)]
+        )
+
+        #expect(result == .int(42))
+    }
+
+    @Test func interpretNamedVoidFunction() throws {
+        let ir = """
+        define void @patch(i64 %value) {
+        entry:
+          ret void
+        }
+        """
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.int(1)]
+        )
+
+        #expect(result == .void)
+    }
+
+    @Test func rejectNamedFunctionArgumentMismatch() {
+        let ir = """
+        define i64 @patch(i64 %value) {
+        entry:
+          ret i64 %value
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.self) {
+            try LLVMIRInterpreter().run(
+                ir: ir,
+                function: "patch",
+                arguments: [.bool(true)]
+            )
+        }
+    }
+
+    @Test func interpretNamedBooleanResult() throws {
+        let ir = """
+        define i1 @patch(i64 %value) {
+        entry:
+          %matches = icmp eq i64 %value, 42
+          ret i1 %matches
+        }
+        """
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.int(42)]
+        )
+
+        #expect(result == .bool(true))
+    }
+
+    @Test func rejectMissingNamedFunction() {
+        let ir = """
+        define i32 @main() {
+        entry:
+          ret i32 0
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.parse("Missing @patch function.")) {
+            try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+        }
+    }
 
     @Test func interpretArithmeticProgram() throws {
         let ir = """
