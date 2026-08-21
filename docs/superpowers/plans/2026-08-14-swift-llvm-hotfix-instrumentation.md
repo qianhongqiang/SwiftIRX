@@ -810,6 +810,12 @@ argv. Select only callable symbols whose first nominal context kind is
 lifecycle contexts, actors, protocols, structs, and enums. Sort and deduplicate
 the exact LLVM symbols and atomically replace the output.
 
+Recognize actors only from an actual conformance descriptor/record root with a
+`ProtocolConformance` subtree: the conformance subject `Type` must directly
+contain the `Class`, and the conformed protocol `Type` must directly contain
+`Protocol` with module `Swift` and identifier `Actor`. Do not combine unrelated
+class and protocol nodes from callable argument or return types.
+
 This manifest is the out-of-tree prototype equivalent of a semantic annotation
 that an in-tree Swift/SIL compiler integration would emit.
 

@@ -201,6 +201,9 @@ INSTANCE_SYMBOL="$(
 STATIC_SYMBOL="$(
   find_swift_symbol '.HotfixReceiverFixture.staticTarget('
 )"
+ACTOR_ARGUMENT_SYMBOL="$(
+  find_swift_symbol '.HotfixReceiverFixture.actorArgumentTarget('
+)"
 STRUCT_SYMBOL="$(
   find_swift_symbol '.HotfixValueFixture.mutatingTarget('
 )"
@@ -220,14 +223,20 @@ CLASS_RETURN_SYMBOL="$(
   find_swift_symbol '.classReturnTarget()'
 )"
 
-for symbol in "$INSTANCE_SYMBOL" "$STATIC_SYMBOL" "$STRUCT_SYMBOL"; do
+for symbol in \
+  "$INSTANCE_SYMBOL" \
+  "$STATIC_SYMBOL" \
+  "$ACTOR_ARGUMENT_SYMBOL" \
+  "$STRUCT_SYMBOL"; do
   grep -F "$symbol" "$TEMP/swift.input.ll" | grep -Fq 'swiftself'
 done
 
 "$MANIFEST_GENERATOR" "$TEMP/swift.input.bc" "$TEMP/swift.manifest"
-if [[ "$(<"$TEMP/swift.manifest")" != "$INSTANCE_SYMBOL" ]]; then
+printf '%s\n' "$INSTANCE_SYMBOL" "$ACTOR_ARGUMENT_SYMBOL" |
+  LC_ALL=C sort -u >"$TEMP/swift.expected-manifest"
+if ! cmp -s "$TEMP/swift.expected-manifest" "$TEMP/swift.manifest"; then
   echo "error: generated class receiver manifest contained unexpected symbols" >&2
-  diff -u <(printf '%s\n' "$INSTANCE_SYMBOL") "$TEMP/swift.manifest" >&2 || true
+  diff -u "$TEMP/swift.expected-manifest" "$TEMP/swift.manifest" >&2 || true
   exit 1
 fi
 for symbol in \
@@ -283,3 +292,19 @@ for symbol in "$STATIC_SYMBOL" "$STRUCT_SYMBOL"; do
   fi
   grep -Fq "[HotfixPass] skip $symbol: unverified swiftself receiver" "$TEMP/swift.stderr"
 done
+
+grep -F "$ACTOR_ARGUMENT_SYMBOL" "$TEMP/swift.transformed.ll" |
+  grep -Fq 'define swiftcc'
+if grep -Fq "$ACTOR_ARGUMENT_SYMBOL.hotfix_original" \
+  "$TEMP/swift.transformed.ll"; then
+  echo "error: unsupported Actor-argument method was instrumented" >&2
+  exit 1
+fi
+if grep -Fq "c\"$ACTOR_ARGUMENT_SYMBOL\\00\"" \
+  "$TEMP/swift.transformed.ll"; then
+  echo "error: unsupported Actor-argument method received a descriptor" >&2
+  exit 1
+fi
+grep -Fq \
+  "[HotfixPass] skip $ACTOR_ARGUMENT_SYMBOL: unsupported non-receiver pointer argument" \
+  "$TEMP/swift.stderr"

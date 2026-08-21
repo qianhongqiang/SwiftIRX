@@ -8,6 +8,9 @@ public final class HotfixReceiverFixture {
 
   @inline(never)
   public static func staticTarget(_ value: Int) -> Int { value + 4 }
+
+  @inline(never)
+  public final func actorArgumentTarget(_ actor: any Actor) -> Int { 9 }
 }
 
 public struct HotfixValueFixture {

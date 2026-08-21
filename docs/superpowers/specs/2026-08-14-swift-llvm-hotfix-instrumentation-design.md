@@ -48,6 +48,11 @@ to stream defined Swift symbols into `xcrun swift-demangle --expand`, accepts
 only callable symbols whose first nominal context is a class, rejects static
 wrappers, lifecycle entries, actors, protocols, structs, and enums, then
 sorts, deduplicates, and atomically writes exact LLVM symbols.
+Actor rejection is scoped to a real conformance descriptor/record root with a
+`ProtocolConformance` subtree whose first direct `Type` contains the subject
+`Class` and whose second direct `Type` contains the `Swift.Actor` protocol.
+Class and protocol nodes in callable argument or return types never classify
+the callable's class context as an actor.
 
 If `IR_HOTFIX_CLASS_RECEIVER_MANIFEST` is unset, the receiver allowlist is
 empty and pointer `swiftself` functions fail closed with `unverified swiftself
