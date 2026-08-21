@@ -1,5 +1,25 @@
 ; RUN: opt -load-pass-plugin %plugin -passes=hotfix-instrument -S %s | FileCheck %s
 
+; CHECK: %struct.ir_hotfix_descriptor = type { i64, i64, i8, i32, i8, ptr, ptr }
+
+; CHECK: @__ir_hotfix_name.37465577a37332e8.a41bdf07a2f121e1 = private constant [14 x i8] c"integerTarget\00"
+; CHECK: @__ir_hotfix_kinds.37465577a37332e8.a41bdf07a2f121e1 = private constant [1 x i8] c"\01"
+; CHECK: @__ir_hotfix_descriptor.37465577a37332e8.a41bdf07a2f121e1 = private constant %struct.ir_hotfix_descriptor { i64 3982964892787487464, i64 -6621453603226705439, i8 1, i32 1, i8 0, ptr @__ir_hotfix_name.37465577a37332e8.a41bdf07a2f121e1, ptr @__ir_hotfix_kinds.37465577a37332e8.a41bdf07a2f121e1 }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_name.e73de7cd22608c82.9252519d49927f55 = private constant [14 x i8] c"booleanTarget\00"
+; CHECK: @__ir_hotfix_kinds.e73de7cd22608c82.9252519d49927f55 = private constant [1 x i8] c"\02"
+; CHECK: @__ir_hotfix_descriptor.e73de7cd22608c82.9252519d49927f55 = private constant %struct.ir_hotfix_descriptor { i64 -1784015009137783678, i64 -7903164660095746219, i8 2, i32 1, i8 0, ptr @__ir_hotfix_name.e73de7cd22608c82.9252519d49927f55, ptr @__ir_hotfix_kinds.e73de7cd22608c82.9252519d49927f55 }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_name.074ae953e60d8322.bf285a56b83c0d68 = private constant [11 x i8] c"voidTarget\00"
+; CHECK: @__ir_hotfix_descriptor.074ae953e60d8322.bf285a56b83c0d68 = private constant %struct.ir_hotfix_descriptor { i64 525488853093286690, i64 -4672385284892258968, i8 3, i32 1, i8 0, ptr @__ir_hotfix_name.074ae953e60d8322.bf285a56b83c0d68, ptr @__ir_hotfix_kinds.074ae953e60d8322.bf285a56b83c0d68 }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [15 x i8] c"instanceTarget\00"
+; CHECK: @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [1 x i8] c"\01"
+; CHECK: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.ir_hotfix_descriptor { i64 5668467115194567859, i64 -6621454702738333650, i8 1, i32 1, i8 1, ptr @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e, ptr @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e }, section "__DATA,__hotfix"
+; CHECK: @llvm.used = appending global [9 x ptr]
+; CHECK-SAME: ptr @__ir_hotfix_descriptor.37465577a37332e8.a41bdf07a2f121e1,
+; CHECK-SAME: ptr @__ir_hotfix_descriptor.e73de7cd22608c82.9252519d49927f55,
+; CHECK-SAME: ptr @__ir_hotfix_descriptor.074ae953e60d8322.bf285a56b83c0d68,
+; CHECK-SAME: ptr @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e,
+; CHECK-SAME: ], section "llvm.metadata"
+
 ; CHECK-LABEL: define swiftcc i64 @integerTarget(
 ; CHECK-SAME: i64 signext %value) #[[INTEGER_ATTRS:[0-9]+]] {
 ; CHECK: %[[INT_KINDS:[^ ]+]] = alloca [1 x i8], align 1
@@ -43,6 +63,22 @@
 ; CHECK: call swiftcc void @voidTarget.hotfix_original(i64 signext %value)
 ; CHECK: ret void
 
+; CHECK-LABEL: define swiftcc i64 @instanceTarget(
+; CHECK-SAME: i64 %value, ptr swiftself %self) #[[INTEGER_ATTRS]] {
+; CHECK: %[[INSTANCE_KINDS:[^ ]+]] = alloca [1 x i8], align 1
+; CHECK: %[[INSTANCE_BITS:[^ ]+]] = alloca [1 x i64], align 8
+; CHECK: store i8 1, ptr %{{[^,]+}}, align 1
+; CHECK: store i64 %value, ptr %{{[^,]+}}, align 8
+; CHECK: %[[INSTANCE_RESULT:[^ ]+]] = alloca i64, align 8
+; CHECK: %[[INSTANCE_APPLIED:[^ ]+]] = call i1 @ir_hotfix_invoke(i64 5668467115194567859, i64 -6621454702738333650, ptr %{{[^,]+}}, ptr %{{[^,]+}}, i32 1, ptr %self, ptr %[[INSTANCE_RESULT]])
+; CHECK: br i1 %[[INSTANCE_APPLIED]], label %[[INSTANCE_PATCHED:[^,]+]], label %[[INSTANCE_FALLBACK:[^,]+]]
+; CHECK: [[INSTANCE_PATCHED]]:
+; CHECK: %[[INSTANCE_VALUE:[^ ]+]] = load i64, ptr %[[INSTANCE_RESULT]], align 8
+; CHECK: ret i64 %[[INSTANCE_VALUE]]
+; CHECK: [[INSTANCE_FALLBACK]]:
+; CHECK: %[[INSTANCE_NATIVE:[^ ]+]] = call swiftcc i64 @instanceTarget.hotfix_original(i64 %value, ptr nocapture readnone swiftself %self)
+; CHECK: ret i64 %[[INSTANCE_NATIVE]]
+
 ; CHECK-LABEL: define swiftcc i64 @recursiveTarget(
 ; CHECK-SAME: i64 signext %value) #[[INTEGER_ATTRS]] {
 ; CHECK: call i1 @ir_hotfix_invoke(i64 891724747207399162, i64 -6621453603226705439,
@@ -71,6 +107,12 @@
 ; CHECK-NEXT: entry:
 ; CHECK-NEXT: %sum = fadd double %value, 1.000000e+00
 ; CHECK-NEXT: ret double %sum
+; CHECK-NEXT: }
+
+; CHECK-LABEL: define swiftcc i64 @unsupportedPointer(ptr %value) {
+; CHECK-NEXT: entry:
+; CHECK-NEXT: %bits = ptrtoint ptr %value to i64
+; CHECK-NEXT: ret i64 %bits
 ; CHECK-NEXT: }
 
 ; CHECK: declare swiftcc i64 @externalTarget(i64 signext)
@@ -102,6 +144,11 @@
 ; CHECK-SAME: i64 signext %value) #[[INTEGER_ATTRS]] {
 ; CHECK: ret void
 
+; CHECK-LABEL: define private swiftcc i64 @instanceTarget.hotfix_original(
+; CHECK-SAME: i64 %value, ptr nocapture readnone swiftself %self) #[[INTEGER_ATTRS]] {
+; CHECK: %sum = add i64 %value, 3
+; CHECK: ret i64 %sum
+
 ; CHECK-LABEL: define private swiftcc i64 @recursiveTarget.hotfix_original(
 ; CHECK-SAME: i64 signext %value) #[[INTEGER_ATTRS]] {
 ; CHECK: %recursive = call swiftcc i64 @recursiveTarget.hotfix_original(i64 signext %next)
@@ -132,6 +179,7 @@
 ; NO-CLONES-NOT: @ir_hotfix_helper.hotfix_original
 ; NO-CLONES-NOT: @already.hotfix_original.hotfix_original
 ; NO-CLONES-NOT: @variadicTarget.hotfix_original
+; NO-CLONES-NOT: @unsupportedPointer.hotfix_original
 
 ; AUTO: define swiftcc i64 @integerTarget
 ; AUTO: call i1 @ir_hotfix_invoke
@@ -153,8 +201,12 @@
 ; OPT: %in.range = icmp ult i64 %patched, 10
 ; OPT: ret i1 %in.range
 
-; RETAIN: @llvm.compiler.used = appending global [16 x ptr]
+; RETAIN: @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [15 x i8] c"instanceTarget\00"
+; RETAIN: @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [1 x i8] c"\01"
+; RETAIN: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.ir_hotfix_descriptor {{.*}}section "__DATA,__hotfix"
+; RETAIN: @llvm.compiler.used = appending global [18 x ptr]
 ; RETAIN-SAME: ptr @booleanTarget, ptr @booleanTarget.hotfix_original,
+; RETAIN-SAME: ptr @instanceTarget, ptr @instanceTarget.hotfix_original,
 ; RETAIN-SAME: ptr @integerTarget, ptr @integerTarget.hotfix_original,
 ; RETAIN-SAME: ptr @internalTarget, ptr @internalTarget.hotfix_original,
 ; RETAIN-SAME: ptr @rangeTarget, ptr @rangeTarget.hotfix_original,
@@ -165,6 +217,9 @@
 ; RETAIN: define swiftcc i64 @integerTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS:[0-9]+]] {
 ; RETAIN: define swiftcc i1 @booleanTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc void @voidTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc i64 @instanceTarget(i64 %value, ptr swiftself %self) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: call i1 @ir_hotfix_invoke({{.*}}i32 1, ptr %self,
+; RETAIN: call swiftcc i64 @instanceTarget.hotfix_original(i64 %value, ptr nocapture readnone swiftself {{(%self|poison)}})
 ; RETAIN: define swiftcc i64 @recursiveTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc i64 @semanticTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define internal swiftcc i64 @internalTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
@@ -173,6 +228,7 @@
 ; RETAIN: define private swiftcc i64 @integerTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS:[0-9]+]] {
 ; RETAIN: define private swiftcc i1 @booleanTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc void @voidTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc i64 @instanceTarget.hotfix_original(i64 %value, ptr nocapture readnone swiftself %self) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc i64 @recursiveTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc i64 @semanticTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc i64 @internalTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
@@ -198,6 +254,12 @@ entry:
 define swiftcc void @voidTarget(i64 signext %value) {
 entry:
   ret void
+}
+
+define swiftcc i64 @instanceTarget(i64 %value, ptr nocapture readnone swiftself %self) {
+entry:
+  %sum = add i64 %value, 3
+  ret i64 %sum
 }
 
 define swiftcc i64 @recursiveTarget(i64 signext %value) {
@@ -263,6 +325,12 @@ define swiftcc double @unsupported(double %value) {
 entry:
   %sum = fadd double %value, 1.000000e+00
   ret double %sum
+}
+
+define swiftcc i64 @unsupportedPointer(ptr %value) {
+entry:
+  %bits = ptrtoint ptr %value to i64
+  ret i64 %bits
 }
 
 declare swiftcc i64 @externalTarget(i64 signext)

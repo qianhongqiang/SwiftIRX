@@ -1,4 +1,5 @@
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -10,6 +11,7 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -21,6 +23,16 @@ using namespace llvm;
 namespace {
 constexpr StringLiteral InstrumentedModuleFlag = "ir.hotfix.instrumented";
 constexpr StringLiteral OriginalSuffix = ".hotfix_original";
+constexpr StringLiteral DescriptorSection = "__DATA,__hotfix";
+
+enum class FunctionClassification { NotCandidate, Eligible, Skipped };
+
+struct FunctionShape {
+  FunctionClassification classification = FunctionClassification::NotCandidate;
+  StringRef skipReason;
+  Argument *receiver = nullptr;
+  SmallVector<Argument *> scalarArguments;
+};
 
 uint64_t fnv1a64(StringRef text) {
   uint64_t hash = 14695981039346656037ULL;
@@ -39,7 +51,8 @@ StringRef scalarName(Type *type) {
   return type->isIntegerTy(64) ? "i64" : "i1";
 }
 
-std::string canonicalSignature(const Function &function) {
+std::string canonicalSignature(const Function &function,
+                               const FunctionShape &shape) {
   std::string signature = "return=";
   signature += function.getReturnType()->isVoidTy()
                    ? "void"
@@ -47,35 +60,66 @@ std::string canonicalSignature(const Function &function) {
   signature += ";arguments=";
 
   bool first = true;
-  for (const Argument &argument : function.args()) {
+  for (const Argument *argument : shape.scalarArguments) {
     if (!first)
       signature += ',';
     first = false;
-    signature += scalarName(argument.getType());
+    signature += scalarName(argument->getType());
   }
 
-  signature += ";receiver=0";
+  signature += shape.receiver == nullptr ? ";receiver=0" : ";receiver=1";
   return signature;
 }
 
-bool isEligible(const Function &function) {
-  if (function.empty() || function.isIntrinsic() || function.isVarArg() ||
+FunctionShape classifyFunction(Function &function) {
+  FunctionShape shape;
+  if (function.empty() || function.isIntrinsic() ||
       function.getCallingConv() != CallingConv::Swift)
-    return false;
+    return shape;
 
   StringRef name = function.getName();
   if (name.starts_with("ir_hotfix_") || name.ends_with(OriginalSuffix))
-    return false;
+    return shape;
+
+  shape.classification = FunctionClassification::Skipped;
+  if (function.isVarArg()) {
+    shape.skipReason = "variadic function";
+    return shape;
+  }
 
   Type *returnType = function.getReturnType();
-  if (!returnType->isVoidTy() && !isScalar(returnType))
-    return false;
-
-  for (const Argument &argument : function.args()) {
-    if (!isScalar(argument.getType()))
-      return false;
+  if (!returnType->isVoidTy() && !isScalar(returnType)) {
+    shape.skipReason = "unsupported return type";
+    return shape;
   }
-  return true;
+
+  for (Argument &argument : function.args()) {
+    if (argument.hasAttribute(Attribute::SwiftSelf)) {
+      if (!argument.getType()->isPointerTy()) {
+        shape.skipReason = "malformed swiftself receiver argument";
+        return shape;
+      }
+      if (shape.receiver != nullptr) {
+        shape.skipReason = "multiple swiftself receiver arguments";
+        return shape;
+      }
+      shape.receiver = &argument;
+      continue;
+    }
+
+    if (argument.getType()->isPointerTy()) {
+      shape.skipReason = "unsupported non-receiver pointer argument";
+      return shape;
+    }
+    if (!isScalar(argument.getType())) {
+      shape.skipReason = "unsupported argument type";
+      return shape;
+    }
+    shape.scalarArguments.push_back(&argument);
+  }
+
+  shape.classification = FunctionClassification::Eligible;
+  return shape;
 }
 
 void addLoadMarker(Module &module) {
@@ -137,14 +181,101 @@ void prepareTrampolineAttributes(Function &function) {
     function.removeFnAttr(kind);
 
   function.removeRetAttr(Attribute::Range);
-  for (Argument &argument : function.args())
+  for (Argument &argument : function.args()) {
     argument.removeAttr(Attribute::Returned);
+    if (argument.hasAttribute(Attribute::SwiftSelf)) {
+      argument.removeAttr(Attribute::NoCapture);
+      argument.removeAttr(Attribute::ReadNone);
+      argument.removeAttr(Attribute::ReadOnly);
+      argument.removeAttr(Attribute::WriteOnly);
+    }
+  }
 
   function.removeFnAttr(Attribute::AlwaysInline);
   function.addFnAttr(Attribute::NoInline);
 }
 
-Function *instrument(Function &function, FunctionCallee runtimeInvoke) {
+uint8_t scalarKind(Type *type) { return type->isIntegerTy(64) ? 1 : 2; }
+
+uint8_t returnKind(Type *type) {
+  if (type->isIntegerTy(64))
+    return 1;
+  if (type->isIntegerTy(1))
+    return 2;
+  return 3;
+}
+
+GlobalVariable *createDescriptor(Function &function, const FunctionShape &shape,
+                                 uint64_t targetID, uint64_t signatureID) {
+  Module &module = *function.getParent();
+  LLVMContext &context = module.getContext();
+  Type *i8 = Type::getInt8Ty(context);
+  Type *i32 = Type::getInt32Ty(context);
+  Type *i64 = Type::getInt64Ty(context);
+  Type *pointer = PointerType::getUnqual(context);
+
+  // Layout: target ID, signature ID, return kind, scalar count, receiver,
+  // mangled-name pointer, ordered scalar-kind pointer.
+  SmallVector<Type *> descriptorFields = {i64, i64,     i8,     i32,
+                                          i8,  pointer, pointer};
+  StructType *descriptorType =
+      StructType::getTypeByName(context, "struct.ir_hotfix_descriptor");
+  if (descriptorType == nullptr) {
+    descriptorType = StructType::create(context, descriptorFields,
+                                        "struct.ir_hotfix_descriptor");
+  } else if (descriptorType->isOpaque() ||
+             !descriptorType->isLayoutIdentical(
+                 StructType::get(context, descriptorFields))) {
+    descriptorType = StructType::create(context, descriptorFields,
+                                        "struct.ir_hotfix_descriptor");
+  }
+
+  std::string uniqueSuffix =
+      utohexstr(targetID, true, 16) + "." + utohexstr(signatureID, true, 16);
+  Constant *nameData =
+      ConstantDataArray::getString(context, function.getName(), true);
+  auto *name = new GlobalVariable(module, nameData->getType(), true,
+                                  GlobalValue::PrivateLinkage, nameData,
+                                  "__ir_hotfix_name." + uniqueSuffix);
+
+  Constant *kindsPointer = ConstantPointerNull::get(cast<PointerType>(pointer));
+  if (!shape.scalarArguments.empty()) {
+    SmallVector<uint8_t> kinds;
+    kinds.reserve(shape.scalarArguments.size());
+    for (const Argument *argument : shape.scalarArguments)
+      kinds.push_back(scalarKind(argument->getType()));
+    Constant *kindsData = ConstantDataArray::get(context, kinds);
+    auto *kindsGlobal = new GlobalVariable(
+        module, kindsData->getType(), true, GlobalValue::PrivateLinkage,
+        kindsData, "__ir_hotfix_kinds." + uniqueSuffix);
+    kindsPointer = kindsGlobal;
+  }
+
+  Constant *fields[] = {
+      ConstantInt::get(i64, targetID),
+      ConstantInt::get(i64, signatureID),
+      ConstantInt::get(i8, returnKind(function.getReturnType())),
+      ConstantInt::get(i32, shape.scalarArguments.size()),
+      ConstantInt::get(i8, shape.receiver == nullptr ? 0 : 1),
+      name,
+      kindsPointer,
+  };
+  Constant *initializer = ConstantStruct::get(descriptorType, fields);
+  auto *descriptor = new GlobalVariable(
+      module, descriptorType, true, GlobalValue::PrivateLinkage, initializer,
+      "__ir_hotfix_descriptor." + uniqueSuffix);
+  descriptor->setSection(DescriptorSection);
+  descriptor->setAlignment(Align(8));
+  return descriptor;
+}
+
+struct InstrumentedFunction {
+  Function *clone;
+  GlobalVariable *descriptor;
+};
+
+InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
+                                FunctionCallee runtimeInvoke) {
   Module &module = *function.getParent();
   LLVMContext &context = module.getContext();
   GlobalValue::LinkageTypes originalLinkage = function.getLinkage();
@@ -170,7 +301,7 @@ Function *instrument(Function &function, FunctionCallee runtimeInvoke) {
   Type *i32 = builder.getInt32Ty();
   Type *i64 = builder.getInt64Ty();
   PointerType *pointer = builder.getPtrTy();
-  const unsigned argumentCount = function.arg_size();
+  const unsigned argumentCount = shape.scalarArguments.size();
 
   Value *kindsPointer = ConstantPointerNull::get(pointer);
   Value *bitsPointer = ConstantPointerNull::get(pointer);
@@ -187,22 +318,22 @@ Function *instrument(Function &function, FunctionCallee runtimeInvoke) {
     bitsPointer = bits;
 
     unsigned index = 0;
-    for (Argument &argument : function.args()) {
+    for (Argument *argument : shape.scalarArguments) {
       Value *indices[] = {builder.getInt32(0), builder.getInt32(index)};
       Value *kindSlot = builder.CreateInBoundsGEP(kindsType, kinds, indices,
                                                   "hotfix.argument.kind");
       Value *bitsSlot = builder.CreateInBoundsGEP(bitsType, bits, indices,
                                                   "hotfix.argument.bits.slot");
 
-      uint8_t kind = argument.getType()->isIntegerTy(64) ? 1 : 2;
+      uint8_t kind = scalarKind(argument->getType());
       StoreInst *kindStore =
           builder.CreateStore(builder.getInt8(kind), kindSlot);
       kindStore->setAlignment(Align(1));
 
-      Value *encoded = &argument;
-      if (argument.getType()->isIntegerTy(1))
+      Value *encoded = argument;
+      if (argument->getType()->isIntegerTy(1))
         encoded =
-            builder.CreateZExt(&argument, i64, "hotfix.argument.bits.value");
+            builder.CreateZExt(argument, i64, "hotfix.argument.bits.value");
       StoreInst *bitsStore = builder.CreateStore(encoded, bitsSlot);
       bitsStore->setAlignment(Align(8));
       ++index;
@@ -218,12 +349,15 @@ Function *instrument(Function &function, FunctionCallee runtimeInvoke) {
   }
 
   uint64_t targetID = fnv1a64(function.getName());
-  uint64_t signatureID = fnv1a64(canonicalSignature(function));
+  uint64_t signatureID = fnv1a64(canonicalSignature(function, shape));
+  Value *receiver = shape.receiver == nullptr
+                        ? ConstantPointerNull::get(pointer)
+                        : static_cast<Value *>(shape.receiver);
   CallInst *applied = builder.CreateCall(
       runtimeInvoke,
       {ConstantInt::get(i64, targetID), ConstantInt::get(i64, signatureID),
        kindsPointer, bitsPointer, ConstantInt::get(i32, argumentCount),
-       ConstantPointerNull::get(pointer), resultPointer},
+       receiver, resultPointer},
       "hotfix.applied");
   builder.CreateCondBr(applied, patched, fallback);
 
@@ -256,7 +390,9 @@ Function *instrument(Function &function, FunctionCallee runtimeInvoke) {
   } else {
     builder.CreateRet(native);
   }
-  return clone;
+  GlobalVariable *descriptor =
+      createDescriptor(function, shape, targetID, signatureID);
+  return {clone, descriptor};
 }
 
 class HotfixPass : public PassInfoMixin<HotfixPass> {
@@ -268,23 +404,38 @@ public:
     module.addModuleFlag(Module::Warning, InstrumentedModuleFlag, 1);
     addLoadMarker(module);
 
-    SmallVector<Function *> eligibleFunctions;
+    struct EligibleFunction {
+      Function *function;
+      FunctionShape shape;
+    };
+    SmallVector<EligibleFunction> eligibleFunctions;
     for (Function &function : module) {
+      FunctionShape shape = classifyFunction(function);
       std::string cloneName = (function.getName() + OriginalSuffix).str();
-      if (isEligible(function) && module.getFunction(cloneName) == nullptr)
-        eligibleFunctions.push_back(&function);
+      if (shape.classification == FunctionClassification::Eligible &&
+          module.getFunction(cloneName) == nullptr) {
+        eligibleFunctions.push_back({&function, std::move(shape)});
+      } else if (shape.classification == FunctionClassification::Skipped) {
+        errs() << "[HotfixPass] skip " << function.getName() << ": "
+               << shape.skipReason << '\n';
+      }
     }
 
     if (!eligibleFunctions.empty()) {
       FunctionCallee runtimeInvoke = getRuntimeInvoke(module);
       SmallVector<GlobalValue *> retainedFunctions;
+      SmallVector<GlobalValue *> retainedDescriptors;
       retainedFunctions.reserve(eligibleFunctions.size() * 2);
-      for (Function *function : eligibleFunctions) {
-        Function *clone = instrument(*function, runtimeInvoke);
-        retainedFunctions.push_back(function);
-        retainedFunctions.push_back(clone);
+      retainedDescriptors.reserve(eligibleFunctions.size());
+      for (EligibleFunction &eligible : eligibleFunctions) {
+        InstrumentedFunction instrumented =
+            instrument(*eligible.function, eligible.shape, runtimeInvoke);
+        retainedFunctions.push_back(eligible.function);
+        retainedFunctions.push_back(instrumented.clone);
+        retainedDescriptors.push_back(instrumented.descriptor);
       }
       appendToCompilerUsed(module, retainedFunctions);
+      appendToUsed(module, retainedDescriptors);
     }
 
     return PreservedAnalyses::none();
