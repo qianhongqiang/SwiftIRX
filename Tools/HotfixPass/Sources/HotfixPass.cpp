@@ -1,6 +1,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -11,11 +12,14 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 using namespace llvm;
@@ -24,6 +28,8 @@ namespace {
 constexpr StringLiteral InstrumentedModuleFlag = "ir.hotfix.instrumented";
 constexpr StringLiteral OriginalSuffix = ".hotfix_original";
 constexpr StringLiteral DescriptorSection = "__DATA,__hotfix";
+constexpr StringLiteral ReceiverManifestEnvironment =
+    "IR_HOTFIX_CLASS_RECEIVER_MANIFEST";
 
 enum class FunctionClassification { NotCandidate, Eligible, Skipped };
 
@@ -71,7 +77,30 @@ std::string canonicalSignature(const Function &function,
   return signature;
 }
 
-FunctionShape classifyFunction(Function &function) {
+StringSet<> loadClassReceiverManifest() {
+  StringSet<> receiverSymbols;
+  const char *manifestPath = std::getenv(ReceiverManifestEnvironment.data());
+  if (manifestPath == nullptr)
+    return receiverSymbols;
+
+  auto manifest = MemoryBuffer::getFile(manifestPath);
+  if (!manifest)
+    report_fatal_error(Twine("[HotfixPass] error: cannot read class receiver "
+                             "manifest '") +
+                           manifestPath + "': " + manifest.getError().message(),
+                       false);
+
+  SmallVector<StringRef> lines;
+  manifest.get()->getBuffer().split(lines, '\n', -1, false);
+  for (StringRef line : lines) {
+    line.consume_back("\r");
+    receiverSymbols.insert(line);
+  }
+  return receiverSymbols;
+}
+
+FunctionShape classifyFunction(Function &function,
+                               const StringSet<> &receiverSymbols) {
   FunctionShape shape;
   if (function.empty() || function.isIntrinsic() ||
       function.getCallingConv() != CallingConv::Swift)
@@ -116,6 +145,12 @@ FunctionShape classifyFunction(Function &function) {
       return shape;
     }
     shape.scalarArguments.push_back(&argument);
+  }
+
+  if (shape.receiver != nullptr &&
+      !receiverSymbols.contains(function.getName())) {
+    shape.skipReason = "unverified swiftself receiver";
+    return shape;
   }
 
   shape.classification = FunctionClassification::Eligible;
@@ -401,6 +436,7 @@ public:
     if (module.getModuleFlag(InstrumentedModuleFlag) != nullptr)
       return PreservedAnalyses::all();
 
+    StringSet<> receiverSymbols = loadClassReceiverManifest();
     module.addModuleFlag(Module::Warning, InstrumentedModuleFlag, 1);
     addLoadMarker(module);
 
@@ -410,7 +446,7 @@ public:
     };
     SmallVector<EligibleFunction> eligibleFunctions;
     for (Function &function : module) {
-      FunctionShape shape = classifyFunction(function);
+      FunctionShape shape = classifyFunction(function, receiverSymbols);
       std::string cloneName = (function.getName() + OriginalSuffix).str();
       if (shape.classification == FunctionClassification::Eligible &&
           module.getFunction(cloneName) == nullptr) {

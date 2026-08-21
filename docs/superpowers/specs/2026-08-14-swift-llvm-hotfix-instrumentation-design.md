@@ -13,8 +13,9 @@ The first version instruments eligible functions by default without source annot
 Supported function shapes:
 
 - Top-level functions.
-- Static functions.
-- Class instance methods whose receiver is lowered as a `swiftself ptr` argument.
+- Static functions that do not carry a pointer `swiftself` parameter.
+- Class instance methods whose receiver is lowered as `swiftself ptr` and whose
+  exact LLVM symbol appears in the generated class receiver manifest.
 - Synchronous, non-generic functions.
 - `i64`, `i1`, and `void` LLVM ABI returns.
 - `i64` and `i1` LLVM ABI value arguments.
@@ -24,6 +25,8 @@ The initial implementation skips:
 - Functions belonging to the hotfix runtime or LLVM IR interpreter.
 - Swift runtime functions, declarations, compiler-generated thunks, metadata accessors, and value witnesses.
 - Struct instance methods and other value-semantic receivers.
+- Class static methods, actors, and protocol, struct, or enum methods whose
+  pointer `swiftself` does not represent a supported class instance.
 - Generic functions and functions with generic metadata or witness-table parameters.
 - `async`, `throws`, `inout`, variadic, indirect-result, aggregate, floating-point, or closure ABI shapes.
 - Initializers and deinitializers unless their emitted ABI is proven safe in a later version.
@@ -34,7 +37,22 @@ Every skipped definition must have an explicit reason available from the pass di
 
 The pass is built against Homebrew LLVM 19.1.7 and runs inside that release's `opt`. It is intentionally not loaded into Apple `swift-frontend`: the frontend does not export the complete LLVM C++ ABI required by a transformation pass, and direct loading was verified to fail once the pass used cloning and IR construction APIs.
 
-Apple Swift 6.2.4 emits LLVM bitcode to a file boundary. A `swiftc` wrapper then invokes Homebrew `opt` with the named `hotfix-instrument` pipeline before continuing object emission. Integration validates the exact Swift and Homebrew LLVM versions before crossing that boundary.
+Apple Swift 6.2.4 emits LLVM bitcode to a file boundary. A `swiftc` wrapper first runs `generate-class-receiver-manifest.sh`, then invokes Homebrew `opt` with the named `hotfix-instrument` pipeline and `IR_HOTFIX_CLASS_RECEIVER_MANIFEST` pointing at that manifest before continuing object emission. Integration validates the exact Swift and Homebrew LLVM versions before crossing that boundary.
+
+LLVM's `swiftself ptr` attribute is not enough to identify an object receiver.
+Swift 6.2.4 also uses it for class static metadata and mutable value storage, so
+casting every such pointer to `AnyObject` is unsafe. The out-of-tree prototype
+therefore generates the semantic allowlist that an in-tree Swift/SIL compiler
+integration would emit directly. The generator uses pinned Homebrew `llvm-nm`
+to stream defined Swift symbols into `xcrun swift-demangle --expand`, accepts
+only callable symbols whose first nominal context is a class, rejects static
+wrappers, lifecycle entries, actors, protocols, structs, and enums, then
+sorts, deduplicates, and atomically writes exact LLVM symbols.
+
+If `IR_HOTFIX_CLASS_RECEIVER_MANIFEST` is unset, the receiver allowlist is
+empty and pointer `swiftself` functions fail closed with `unverified swiftself
+receiver`; scalar functions without receivers remain eligible. An unreadable
+configured manifest is a hard pass error for an uninstrumented module.
 
 The compilation flow is:
 
@@ -42,6 +60,7 @@ The compilation flow is:
 Swift source
   -> Swift AST and SIL
   -> Apple Swift LLVM bitcode
+  -> llvm-nm + swift-demangle class receiver manifest
   -> Homebrew opt + HotfixInstrumentationPass
   -> transformed LLVM bitcode
   -> object emission
@@ -56,15 +75,17 @@ Only app-target bitcode is transformed. Runtime and interpreter source files are
 
 For each eligible definition, the pass:
 
-1. Computes a 64-bit target ID from the original mangled symbol.
-2. Computes a 64-bit signature ID from the supported LLVM return type, ordered argument types, and receiver presence.
-3. Clones the original body to a private `<symbol>.hotfix_original` function.
-4. Preserves the original symbol, linkage, calling convention, ABI-significant attributes, and `swiftself` placement on the trampoline while removing old-body semantic promises invalidated by patch dispatch.
-5. Replaces the original body with a call to the C ABI runtime bridge.
-6. Returns the patch result when the bridge reports success.
-7. Calls `<symbol>.hotfix_original` with the untouched incoming values when the bridge reports failure.
-8. Remaps direct recursive references inside the clone to `<symbol>.hotfix_original`, so native fallback recursion does not repeatedly traverse the trampoline.
-9. Marks both definitions `noinline` and records them in `llvm.compiler.used`, retaining patch points and native fallbacks through O0/O2 without changing original linkage.
+1. Requires exact manifest membership before treating a pointer `swiftself` as
+   a class receiver.
+2. Computes a 64-bit target ID from the original mangled symbol.
+3. Computes a 64-bit signature ID from the supported LLVM return type, ordered argument types, and receiver presence.
+4. Clones the original body to a private `<symbol>.hotfix_original` function.
+5. Preserves the original symbol, linkage, calling convention, ABI-significant attributes, and `swiftself` placement on the trampoline while removing old-body semantic promises invalidated by patch dispatch.
+6. Replaces the original body with a call to the C ABI runtime bridge.
+7. Returns the patch result when the bridge reports success.
+8. Calls `<symbol>.hotfix_original` with the untouched incoming values when the bridge reports failure.
+9. Remaps direct recursive references inside the clone to `<symbol>.hotfix_original`, so native fallback recursion does not repeatedly traverse the trampoline.
+10. Marks both definitions `noinline` and records them in `llvm.compiler.used`, retaining patch points and native fallbacks through O0/O2 without changing original linkage.
 
 Conceptually:
 
@@ -221,7 +242,9 @@ Pass tests compile or transform small LLVM IR fixtures and assert:
 
 - Eligible functions gain a trampoline and original clone.
 - Calling convention and parameter attributes are preserved.
-- Integer, boolean, void, and class receiver shapes are marshalled correctly.
+- Integer, boolean, void, and manifest-verified class receiver shapes are marshalled correctly.
+- Class static, mutating value, actor, protocol, and nominal argument/return
+  decoys are excluded by real demangle output.
 - Unsupported ABI shapes are unchanged and report a reason.
 - Runtime declarations and generated clones are not reinstrumented.
 - Descriptor records are emitted.

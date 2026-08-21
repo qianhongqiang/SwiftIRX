@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
 FIRST_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
 SECOND_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture_second.swift"
+MANIFEST_GENERATOR="$ROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh"
 LLVM_ROOT="/opt/homebrew/opt/llvm@19/bin"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-swift-bitcode.XXXXXX")"
 
@@ -35,6 +36,10 @@ if [[ ! -f "$PLUGIN" ]]; then
   echo "error: pass plugin not found at $PLUGIN" >&2
   exit 1
 fi
+if [[ ! -x "$MANIFEST_GENERATOR" ]]; then
+  echo "error: receiver manifest generator not found at $MANIFEST_GENERATOR" >&2
+  exit 1
+fi
 
 transform_swift_module() {
   local fixture="$1"
@@ -49,7 +54,12 @@ transform_swift_module() {
     "$fixture" \
     -o "$TEMP/$output_name.input.bc"
 
-  "$LLVM_ROOT/opt" \
+  "$MANIFEST_GENERATOR" \
+    "$TEMP/$output_name.input.bc" \
+    "$TEMP/$output_name.manifest"
+
+  IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$TEMP/$output_name.manifest" \
+    "$LLVM_ROOT/opt" \
     -load-pass-plugin "$PLUGIN" \
     -passes=hotfix-instrument \
     -verify-each \
@@ -70,6 +80,8 @@ grep -Fq '@hotfix_pass_loaded = private constant' "$TEMP/first.transformed.ll"
 grep -Fq 'hotfix-pass-loaded' "$TEMP/first.transformed.ll"
 grep -Fq '@hotfix_pass_loaded = private constant' "$TEMP/second.transformed.ll"
 grep -Fq 'hotfix-pass-loaded' "$TEMP/second.transformed.ll"
+grep -Eq '^define private swiftcc i64 .*instanceTarget.*\.hotfix_original' \
+  "$TEMP/first.transformed.ll"
 
 "$LLVM_ROOT/llvm-link" \
   "$TEMP/first.transformed.bc" \

@@ -79,6 +79,13 @@
 ; CHECK: %[[INSTANCE_NATIVE:[^ ]+]] = call swiftcc i64 @instanceTarget.hotfix_original(i64 %value, ptr nocapture readnone swiftself %self)
 ; CHECK: ret i64 %[[INSTANCE_NATIVE]]
 
+; CHECK-LABEL: define swiftcc i64 @unverifiedReceiver(
+; CHECK-SAME: i64 %value, ptr nocapture readnone swiftself %self) {
+; CHECK-NEXT: entry:
+; CHECK-NEXT: %sum = add i64 %value, 4
+; CHECK-NEXT: ret i64 %sum
+; CHECK-NEXT: }
+
 ; CHECK-LABEL: define swiftcc i64 @recursiveTarget(
 ; CHECK-SAME: i64 signext %value) #[[INTEGER_ATTRS]] {
 ; CHECK: call i1 @ir_hotfix_invoke(i64 891724747207399162, i64 -6621453603226705439,
@@ -180,6 +187,16 @@
 ; NO-CLONES-NOT: @already.hotfix_original.hotfix_original
 ; NO-CLONES-NOT: @variadicTarget.hotfix_original
 ; NO-CLONES-NOT: @unsupportedPointer.hotfix_original
+; NO-CLONES-NOT: @unverifiedReceiver.hotfix_original
+
+; NO-MANIFEST: define swiftcc i64 @integerTarget
+; NO-MANIFEST: call i1 @ir_hotfix_invoke
+; NO-MANIFEST-LABEL: define swiftcc i64 @instanceTarget(
+; NO-MANIFEST-SAME: i64 %value, ptr nocapture readnone swiftself %self) {
+; NO-MANIFEST-NEXT: entry:
+; NO-MANIFEST-NEXT: %sum = add i64 %value, 3
+; NO-MANIFEST-NEXT: ret i64 %sum
+; NO-MANIFEST-NEXT: }
 
 ; AUTO: define swiftcc i64 @integerTarget
 ; AUTO: call i1 @ir_hotfix_invoke
@@ -259,6 +276,12 @@ entry:
 define swiftcc i64 @instanceTarget(i64 %value, ptr nocapture readnone swiftself %self) {
 entry:
   %sum = add i64 %value, 3
+  ret i64 %sum
+}
+
+define swiftcc i64 @unverifiedReceiver(i64 %value, ptr nocapture readnone swiftself %self) {
+entry:
+  %sum = add i64 %value, 4
   ret i64 %sum
 }
 

@@ -717,7 +717,7 @@ Compute signature IDs from the exact canonical text used by `HotfixID.signature`
 return=<void|i1|i64>;arguments=<comma-separated i1/i64>;receiver=<0|1>
 ```
 
-Eligible functions must be definitions using `CallingConv::Swift`, must not be generated clones or runtime functions, must have supported returns, and must have only scalar arguments except for one optional `swiftself ptr` argument.
+Eligible functions must be definitions using `CallingConv::Swift`, must not be generated clones or runtime functions, must have supported returns, and must have only scalar arguments except for one optional `swiftself ptr` argument. A pointer `swiftself` is eligible only when the exact LLVM symbol appears in the generated class receiver manifest.
 
 - [ ] **Step 3: Implement clone and trampoline generation**
 
@@ -774,10 +774,16 @@ git commit -m "feat: instrument scalar Swift functions"
 - Modify: `Tools/HotfixPass/Tests/fixtures/scalars.ll`
 - Modify: `Tools/HotfixPass/Tests/fixtures/swift_fixture.swift`
 - Modify: `Tools/HotfixPass/Tests/run-pass-tests.sh`
+- Modify: `Tools/HotfixPass/Tests/verify-swift-load.sh`
+- Create: `Tools/HotfixPass/generate-class-receiver-manifest.sh`
 
 - [ ] **Step 1: Add failing receiver and metadata checks**
 
-Add a `swiftcc i64 (i64, ptr swiftself)` fixture and assert:
+Add listed and unlisted `swiftcc i64 (i64, ptr swiftself)` fixtures. Assert
+that only the listed symbol receives a trampoline, clone, receiver descriptor,
+and raw receiver bridge argument. Without a manifest, both receivers must fail
+closed while scalar functions remain eligible. An unreadable configured
+manifest must fail `opt` clearly.
 
 ```llvm
 ; CHECK: define swiftcc i64 @instanceTarget(i64 %value, ptr swiftself %self)
@@ -790,17 +796,38 @@ Add an unsupported pointer argument and assert the output contains the original 
 
 - [ ] **Step 2: Run and verify RED**
 
-Expected: receiver, descriptor, and diagnostic assertions fail.
+Expected: the current pass instruments the unlisted receiver and the real
+Swift class static and mutating struct methods, so receiver safety assertions
+fail.
 
-- [ ] **Step 3: Implement receiver detection and marshalling**
+- [ ] **Step 3: Generate the semantic class receiver manifest**
 
-Detect `Attribute::SwiftSelf` on exactly one pointer parameter, exclude it from scalar buffers, and pass it as the bridge receiver. Reject every other pointer parameter in the first version. The clone fallback call receives the original `swiftself` value and attributes unchanged.
+Create `generate-class-receiver-manifest.sh`. It accepts input bitcode and an
+output path, uses pinned Homebrew `llvm-nm` to list defined Swift symbols, and
+streams them through `xcrun swift-demangle --expand` without building a large
+argv. Select only callable symbols whose first nominal context kind is
+`Class`; reject `Static`, allocator/constructor/destructor/deallocator and ivar
+lifecycle contexts, actors, protocols, structs, and enums. Sort and deduplicate
+the exact LLVM symbols and atomically replace the output.
 
-- [ ] **Step 4: Emit fixed-layout descriptors**
+This manifest is the out-of-tree prototype equivalent of a semantic annotation
+that an in-tree Swift/SIL compiler integration would emit.
+
+- [ ] **Step 4: Require manifest membership and marshal receivers**
+
+Read the path from `IR_HOTFIX_CLASS_RECEIVER_MANIFEST`. Treat an unset variable
+as an empty allowlist; fail clearly when a configured manifest cannot be read.
+Require exact symbol membership before accepting a pointer `swiftself`, and
+otherwise diagnose `unverified swiftself receiver`. Detect exactly one pointer
+receiver, exclude it from scalar buffers, and pass it as the bridge receiver.
+Reject every other pointer parameter. The clone fallback call receives the
+original `swiftself` value and attributes unchanged.
+
+- [ ] **Step 5: Emit fixed-layout descriptors**
 
 Emit one private constant per target in `__DATA,__hotfix` containing target ID, signature ID, return kind, argument count, receiver flag, and a pointer to a private mangled-name string. Add `llvm.used` references so the optimizer and linker retain the records.
 
-- [ ] **Step 5: Emit deterministic skip diagnostics**
+- [ ] **Step 6: Emit deterministic skip diagnostics**
 
 Print one line per defined, non-runtime Swift function skipped by eligibility:
 
@@ -810,15 +837,17 @@ Print one line per defined, non-runtime Swift function skipped by eligibility:
 
 Do not diagnose external declarations, LLVM intrinsics, runtime bridge symbols, or generated clones.
 
-- [ ] **Step 6: Run both pass suites and verify GREEN**
+- [ ] **Step 7: Run both pass suites and verify GREEN**
 
-Expected: scalar, receiver, descriptor, diagnostic, and Swift bitcode checks PASS.
+Expected: scalar, verified receiver, descriptor, diagnostic, demangle parser,
+fail-closed, and Swift bitcode checks PASS. The two-module load/link test must
+generate and pass a manifest for each module.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add Tools/HotfixPass
-git commit -m "feat: describe instrumented Swift methods"
+git commit -m "fix: require verified class receivers"
 ```
 
 ## Task 7: Integrate the Bitcode Transformer With the App
@@ -828,6 +857,7 @@ git commit -m "feat: describe instrumented Swift methods"
 - Modify: `IR/ViewController.swift`
 - Modify: `IR.xcodeproj/project.pbxproj`
 - Test: `IRTests/IRTests.swift`
+- Use: `Tools/HotfixPass/generate-class-receiver-manifest.sh`
 
 - [ ] **Step 1: Add a failing app-level hotfix test**
 
@@ -889,7 +919,13 @@ Set the app target Debug configuration to the wrapper implemented for the file-b
 SWIFT_EXEC = $(SRCROOT)/Tools/HotfixPass/swiftc-hotfix
 ```
 
-Leave Release unchanged. The wrapper emits Apple Swift bitcode, invokes Homebrew `opt` with `-passes=hotfix-instrument`, and resumes object emission. Add pass ignore options for `Hotfix.swift` and `LLVMIRInterpreter.swift` through plugin command-line options or compiled defaults.
+Leave Release unchanged. The wrapper emits Apple Swift bitcode, runs
+`generate-class-receiver-manifest.sh <input.bc> <manifest>`, invokes Homebrew
+`opt` with `IR_HOTFIX_CLASS_RECEIVER_MANIFEST=<manifest>` and
+`-passes=hotfix-instrument`, then resumes object emission. The manifest and
+transformed bitcode must be module-local derived files. Add pass ignore options
+for `Hotfix.swift` and `LLVMIRInterpreter.swift` through plugin command-line
+options or compiled defaults.
 
 - [ ] **Step 5: Replace the manual ViewController demo**
 
@@ -906,7 +942,10 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
 
 xcrun swiftc -O -emit-bc -parse-as-library \
   IR/HotfixDemo.swift -o /tmp/HotfixDemo.input.bc
-/opt/homebrew/opt/llvm@19/bin/opt \
+Tools/HotfixPass/generate-class-receiver-manifest.sh \
+  /tmp/HotfixDemo.input.bc /tmp/HotfixDemo.receivers
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST=/tmp/HotfixDemo.receivers \
+  /opt/homebrew/opt/llvm@19/bin/opt \
   -load-pass-plugin=Tools/HotfixPass/.build/libHotfixPass.dylib \
   -passes=hotfix-instrument -S /tmp/HotfixDemo.input.bc \
   -o /tmp/HotfixDemo.instrumented.ll

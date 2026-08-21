@@ -6,10 +6,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
 FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/scalars.ll"
 SWIFT_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
+MANIFEST_GENERATOR="$ROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh"
 OPT="/opt/homebrew/opt/llvm@19/bin/opt"
 FILECHECK="/opt/homebrew/opt/llvm@19/bin/FileCheck"
 LLVM_DIS="/opt/homebrew/opt/llvm@19/bin/llvm-dis"
+LLVM_NM="/opt/homebrew/opt/llvm@19/bin/llvm-nm"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-pass-scalars.XXXXXX")"
+SCALAR_MANIFEST="$TEMP/scalar-receivers.txt"
 
 cleanup() {
   rm -rf "$TEMP"
@@ -21,14 +24,48 @@ if [[ ! -f "$PLUGIN" ]]; then
   exit 1
 fi
 
-"$OPT" \
+if [[ ! -x "$MANIFEST_GENERATOR" ]]; then
+  echo "error: receiver manifest generator not found at $MANIFEST_GENERATOR" >&2
+  exit 1
+fi
+
+find_swift_symbol() {
+  local demangled_fragment="$1"
+  local symbol
+  local demangled
+  local match=""
+
+  while IFS= read -r symbol; do
+    demangled="$(printf '%s\n' "$symbol" | xcrun swift-demangle --compact)"
+    case "$demangled" in
+      "method descriptor for "* | "protocol witness for "*) continue ;;
+    esac
+    if [[ "$demangled" == *"$demangled_fragment"* ]]; then
+      if [[ -n "$match" ]]; then
+        echo "error: multiple Swift symbols matched $demangled_fragment" >&2
+        return 1
+      fi
+      match="$symbol"
+    fi
+  done <"$TEMP/swift.symbols.txt"
+
+  if [[ -z "$match" ]]; then
+    echo "error: no Swift symbol matched $demangled_fragment" >&2
+    return 1
+  fi
+  printf '%s\n' "$match"
+}
+
+printf '%s\n' 'absentFromModule' 'instanceTarget' >"$SCALAR_MANIFEST"
+
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$SCALAR_MANIFEST" "$OPT" \
   -load-pass-plugin "$PLUGIN" \
   -passes=hotfix-instrument \
   -verify-each \
   -S "$FIXTURE" \
   -o "$TEMP/named.ll" \
   2>"$TEMP/named.stderr"
-EXPECTED_DIAGNOSTICS=$'[HotfixPass] skip unsupported: unsupported return type\n[HotfixPass] skip unsupportedPointer: unsupported non-receiver pointer argument\n[HotfixPass] skip variadicTarget: variadic function'
+EXPECTED_DIAGNOSTICS=$'[HotfixPass] skip unverifiedReceiver: unverified swiftself receiver\n[HotfixPass] skip unsupported: unsupported return type\n[HotfixPass] skip unsupportedPointer: unsupported non-receiver pointer argument\n[HotfixPass] skip variadicTarget: variadic function'
 if [[ "$(<"$TEMP/named.stderr")" != "$EXPECTED_DIAGNOSTICS" ]]; then
   echo "error: named pass diagnostics differ from the expected deterministic output" >&2
   diff -u <(printf '%s\n' "$EXPECTED_DIAGNOSTICS") "$TEMP/named.stderr" >&2 || true
@@ -39,7 +76,7 @@ fi
   "$FIXTURE" \
   <"$TEMP/named.ll"
 
-"$OPT" \
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$SCALAR_MANIFEST" "$OPT" \
   -load-pass-plugin "$PLUGIN" \
   -passes='hotfix-instrument,hotfix-instrument' \
   -verify-each \
@@ -72,7 +109,7 @@ if ! grep -Fq '@llvm.used = appending global [9 x ptr]' "$TEMP/repeated.ll"; the
   exit 1
 fi
 
-"$OPT" \
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$SCALAR_MANIFEST" "$OPT" \
   -load-pass-plugin "$PLUGIN" \
   -passes='default<O0>' \
   -verify-each \
@@ -83,7 +120,7 @@ fi
   "$FIXTURE" \
   <"$TEMP/automatic.ll"
 
-"$OPT" \
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$SCALAR_MANIFEST" "$OPT" \
   -load-pass-plugin "$PLUGIN" \
   -passes='default<O2>' \
   -verify-each \
@@ -102,6 +139,50 @@ fi
   "$FIXTURE" \
   <"$TEMP/optimized.ll"
 
+env -u IR_HOTFIX_CLASS_RECEIVER_MANIFEST "$OPT" \
+  -load-pass-plugin "$PLUGIN" \
+  -passes=hotfix-instrument \
+  -verify-each \
+  -S "$FIXTURE" \
+  -o "$TEMP/no-manifest.ll" \
+  2>"$TEMP/no-manifest.stderr"
+"$FILECHECK" \
+  --check-prefix=NO-MANIFEST \
+  "$FIXTURE" \
+  <"$TEMP/no-manifest.ll"
+grep -Fq 'define private swiftcc i64 @integerTarget.hotfix_original' "$TEMP/no-manifest.ll"
+if grep -Fq '@instanceTarget.hotfix_original' "$TEMP/no-manifest.ll"; then
+  echo "error: a receiver was instrumented without a class manifest" >&2
+  exit 1
+fi
+grep -Fq '[HotfixPass] skip instanceTarget: unverified swiftself receiver' "$TEMP/no-manifest.stderr"
+grep -Fq '[HotfixPass] skip unverifiedReceiver: unverified swiftself receiver' "$TEMP/no-manifest.stderr"
+
+if IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$TEMP/missing.manifest" "$OPT" \
+  -load-pass-plugin "$PLUGIN" \
+  -passes=hotfix-instrument \
+  -disable-output "$FIXTURE" \
+  2>"$TEMP/missing-manifest.stderr"; then
+  echo "error: an unreadable class receiver manifest did not fail the pass" >&2
+  exit 1
+fi
+grep -Fq '[HotfixPass] error: cannot read class receiver manifest' "$TEMP/missing-manifest.stderr"
+
+if ! IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$TEMP/stale.manifest" "$OPT" \
+  -load-pass-plugin "$PLUGIN" \
+  -passes=hotfix-instrument \
+  -verify-each \
+  -S "$TEMP/named.ll" \
+  -o "$TEMP/already-instrumented.ll" \
+  2>"$TEMP/already-instrumented.stderr"; then
+  echo "error: stale manifest state broke an already-instrumented module" >&2
+  exit 1
+fi
+if [[ -s "$TEMP/already-instrumented.stderr" ]]; then
+  echo "error: an already-instrumented module emitted diagnostics" >&2
+  exit 1
+fi
+
 xcrun swiftc \
   -O \
   -emit-bc \
@@ -109,7 +190,76 @@ xcrun swiftc \
   -module-name HotfixReceiverPassFixture \
   "$SWIFT_FIXTURE" \
   -o "$TEMP/swift.input.bc"
-"$OPT" \
+"$LLVM_DIS" "$TEMP/swift.input.bc" -o "$TEMP/swift.input.ll"
+"$LLVM_NM" --defined-only --just-symbol-name "$TEMP/swift.input.bc" |
+  sed -n 's/^_\(\$s.*\)$/\1/p' |
+  LC_ALL=C sort -u >"$TEMP/swift.symbols.txt"
+
+INSTANCE_SYMBOL="$(
+  find_swift_symbol '.HotfixReceiverFixture.instanceTarget('
+)"
+STATIC_SYMBOL="$(
+  find_swift_symbol '.HotfixReceiverFixture.staticTarget('
+)"
+STRUCT_SYMBOL="$(
+  find_swift_symbol '.HotfixValueFixture.mutatingTarget('
+)"
+ENUM_SYMBOL="$(
+  find_swift_symbol '.HotfixEnumFixture.enumTarget('
+)"
+ACTOR_SYMBOL="$(
+  find_swift_symbol '.HotfixActorFixture.actorTarget('
+)"
+PROTOCOL_SYMBOL="$(
+  find_swift_symbol '.HotfixProtocolFixture.protocolTarget('
+)"
+CLASS_ARGUMENT_SYMBOL="$(
+  find_swift_symbol '.classArgumentTarget('
+)"
+CLASS_RETURN_SYMBOL="$(
+  find_swift_symbol '.classReturnTarget()'
+)"
+
+for symbol in "$INSTANCE_SYMBOL" "$STATIC_SYMBOL" "$STRUCT_SYMBOL"; do
+  grep -F "$symbol" "$TEMP/swift.input.ll" | grep -Fq 'swiftself'
+done
+
+"$MANIFEST_GENERATOR" "$TEMP/swift.input.bc" "$TEMP/swift.manifest"
+if [[ "$(<"$TEMP/swift.manifest")" != "$INSTANCE_SYMBOL" ]]; then
+  echo "error: generated class receiver manifest contained unexpected symbols" >&2
+  diff -u <(printf '%s\n' "$INSTANCE_SYMBOL") "$TEMP/swift.manifest" >&2 || true
+  exit 1
+fi
+for symbol in \
+  "$STATIC_SYMBOL" \
+  "$STRUCT_SYMBOL" \
+  "$ENUM_SYMBOL" \
+  "$ACTOR_SYMBOL" \
+  "$PROTOCOL_SYMBOL" \
+  "$CLASS_ARGUMENT_SYMBOL" \
+  "$CLASS_RETURN_SYMBOL"; do
+  if grep -Fxq "$symbol" "$TEMP/swift.manifest"; then
+    echo "error: generated class receiver manifest admitted $symbol" >&2
+    exit 1
+  fi
+done
+
+if "$MANIFEST_GENERATOR" "$TEMP/missing-input.bc" "$TEMP/unused.manifest" \
+  2>"$TEMP/generator-missing-input.stderr"; then
+  echo "error: manifest generator accepted a missing input" >&2
+  exit 1
+fi
+grep -Fq 'error: input bitcode is not readable' "$TEMP/generator-missing-input.stderr"
+if "$MANIFEST_GENERATOR" \
+  "$TEMP/swift.input.bc" \
+  "$TEMP/missing-output-directory/unused.manifest" \
+  2>"$TEMP/generator-output.stderr"; then
+  echo "error: manifest generator accepted an invalid output path" >&2
+  exit 1
+fi
+grep -Fq 'error: output directory is not writable' "$TEMP/generator-output.stderr"
+
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$TEMP/swift.manifest" "$OPT" \
   -load-pass-plugin "$PLUGIN" \
   -passes=hotfix-instrument \
   -verify-each \
@@ -117,7 +267,19 @@ xcrun swiftc \
   -o "$TEMP/swift.transformed.bc" \
   2>"$TEMP/swift.stderr"
 "$LLVM_DIS" "$TEMP/swift.transformed.bc" -o "$TEMP/swift.transformed.ll"
-grep -Eq '^define swiftcc i64 .*instanceTarget.*\(i64 [^,]+, ptr [^)]*swiftself' "$TEMP/swift.transformed.ll"
-grep -Eq '^define private swiftcc i64 .*instanceTarget.*\.hotfix_original"?\(i64 [^,]+, ptr [^)]*swiftself' "$TEMP/swift.transformed.ll"
+grep -Fq "define swiftcc i64 @\"$INSTANCE_SYMBOL\"" "$TEMP/swift.transformed.ll"
+grep -Fq "define private swiftcc i64 @\"$INSTANCE_SYMBOL.hotfix_original\"" "$TEMP/swift.transformed.ll"
 grep -Eq 'call i1 @ir_hotfix_invoke\(i64 [^,]+, i64 [^,]+, ptr [^,]+, ptr [^,]+, i32 1, ptr %[^,]+, ptr %[^)]+\)' "$TEMP/swift.transformed.ll"
 grep -Eq 'private constant %struct\.ir_hotfix_descriptor \{ i64 [^,]+, i64 [^,]+, i8 1, i32 1, i8 1, ptr [^,]+, ptr [^}]+\}, section "__DATA,__hotfix"' "$TEMP/swift.transformed.ll"
+for symbol in "$STATIC_SYMBOL" "$STRUCT_SYMBOL"; do
+  grep -Fq "define swiftcc i64 @\"$symbol\"" "$TEMP/swift.transformed.ll"
+  if grep -Fq "$symbol.hotfix_original" "$TEMP/swift.transformed.ll"; then
+    echo "error: unsafe Swift receiver $symbol was instrumented" >&2
+    exit 1
+  fi
+  if grep -Fq "c\"$symbol\\00\"" "$TEMP/swift.transformed.ll"; then
+    echo "error: unsafe Swift receiver $symbol received a descriptor" >&2
+    exit 1
+  fi
+  grep -Fq "[HotfixPass] skip $symbol: unverified swiftself receiver" "$TEMP/swift.stderr"
+done
