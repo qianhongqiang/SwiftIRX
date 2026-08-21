@@ -85,17 +85,6 @@ awk '
     return value
   }
 
-  function subtree_key(node_index, base, key, current) {
-    base = indentation(lines[node_index])
-    key = ""
-    for (current = node_index; current <= line_count; ++current) {
-      if (current > node_index && indentation(lines[current]) <= base)
-        break
-      key = key substr(lines[current], base + 1) "\034"
-    }
-    return key
-  }
-
   function is_callable(kind) {
     return kind == "Function" || kind == "Getter" || kind == "Setter" ||
            kind == "ModifyAccessor" || kind == "ReadAccessor" ||
@@ -107,76 +96,7 @@ awk '
            kind == "Protocol" || kind == "Actor"
   }
 
-  function is_conformance_record(kind) {
-    return kind == "ProtocolConformanceDescriptor" ||
-           kind == "ProtocolConformance"
-  }
-
-  function direct_child(node_index, expected_kind, base, current) {
-    base = indentation(lines[node_index])
-    for (current = node_index + 1; current <= line_count; ++current) {
-      if (indentation(lines[current]) <= base)
-        break
-      if (indentation(lines[current]) == base + 2 &&
-          node_kind(lines[current]) == expected_kind)
-        return current
-    }
-    return 0
-  }
-
-  function is_swift_actor_protocol(protocol_index, base, current,
-                                   found_actor, found_swift, kind) {
-    base = indentation(lines[protocol_index])
-    found_actor = 0
-    found_swift = 0
-    for (current = protocol_index + 1; current <= line_count; ++current) {
-      if (indentation(lines[current]) <= base)
-        break
-      if (indentation(lines[current]) != base + 2)
-        continue
-      kind = node_kind(lines[current])
-      if (kind == "Module" && lines[current] ~ /text="Swift"/)
-        found_swift = 1
-      if (kind == "Identifier" && lines[current] ~ /text="Actor"/)
-        found_actor = 1
-    }
-    return found_swift && found_actor
-  }
-
-  function actor_subject(conformance_index, base, class_node, current,
-                         protocol_node, protocol_type, subject_type,
-                         type_count) {
-    base = indentation(lines[conformance_index])
-    type_count = 0
-    subject_type = 0
-    protocol_type = 0
-    for (current = conformance_index + 1;
-         current <= line_count;
-         ++current) {
-      if (indentation(lines[current]) <= base)
-        break
-      if (indentation(lines[current]) == base + 2 &&
-          node_kind(lines[current]) == "Type") {
-        ++type_count
-        if (type_count == 1)
-          subject_type = current
-        else if (type_count == 2)
-          protocol_type = current
-      }
-    }
-    if (subject_type == 0 || protocol_type == 0)
-      return 0
-
-    class_node = direct_child(subject_type, "Class")
-    protocol_node = direct_child(protocol_type, "Protocol")
-    if (class_node == 0 || protocol_node == 0 ||
-        !is_swift_actor_protocol(protocol_node))
-      return 0
-    return class_node
-  }
-
-  function process_block(    actor_class, context, current, kind, root,
-                              root_index) {
+  function process_block(    context, current, kind, root, root_index) {
     if (symbol == "")
       return
 
@@ -202,17 +122,7 @@ awk '
         }
       }
       if (context != 0 && node_kind(lines[context]) == "Class")
-        candidates[symbol] = subtree_key(context)
-    }
-
-    if (is_conformance_record(root)) {
-      for (current = 1; current <= line_count; ++current) {
-        if (node_kind(lines[current]) == "ProtocolConformance") {
-          actor_class = actor_subject(current)
-          if (actor_class != 0)
-            actors[subtree_key(actor_class)] = 1
-        }
-      }
+        candidates[symbol] = 1
     }
   }
 
@@ -230,10 +140,8 @@ awk '
 
   END {
     process_block()
-    for (candidate in candidates) {
-      if (!(candidates[candidate] in actors))
-        print candidate
-    }
+    for (candidate in candidates)
+      print candidate
   }
 ' "$TEMP/demangled.txt" | LC_ALL=C sort -u >"$OUTPUT_TEMP"
 

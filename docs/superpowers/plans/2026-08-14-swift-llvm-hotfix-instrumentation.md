@@ -807,14 +807,18 @@ output path, uses pinned Homebrew `llvm-nm` to list defined Swift symbols, and
 streams them through `xcrun swift-demangle --expand` without building a large
 argv. Select only callable symbols whose first nominal context kind is
 `Class`; reject `Static`, allocator/constructor/destructor/deallocator and ivar
-lifecycle contexts, actors, protocols, structs, and enums. Sort and deduplicate
-the exact LLVM symbols and atomically replace the output.
+lifecycle contexts, protocols, structs, and enums. Sort and deduplicate the
+exact LLVM symbols and atomically replace the output. Use the first nominal
+context so class types appearing only in callable arguments or returns cannot
+admit a top-level or value-context function.
 
-Recognize actors only from an actual conformance descriptor/record root with a
-`ProtocolConformance` subtree: the conformance subject `Type` must directly
-contain the `Class`, and the conformed protocol `Type` must directly contain
-`Protocol` with module `Swift` and identifier `Actor`. Do not combine unrelated
-class and protocol nodes from callable argument or return types.
+Actor contexts demangle as `Class` and are intentionally supported, including
+extensions of actors defined in another module. Actors are heap objects valid
+as `AnyObject` receivers. Their target methods and interpreted patches must be
+synchronous and non-suspending: the trampoline runs inside the original actor
+method body after Swift establishes the executor and isolation context, and the
+runtime bridge remains synchronous. Async functions and patches stay outside
+this prototype.
 
 This manifest is the out-of-tree prototype equivalent of a semantic annotation
 that an in-tree Swift/SIL compiler integration would emit.
@@ -846,8 +850,9 @@ Do not diagnose external declarations, LLVM intrinsics, runtime bridge symbols, 
 - [ ] **Step 7: Run both pass suites and verify GREEN**
 
 Expected: scalar, verified receiver, descriptor, diagnostic, demangle parser,
-fail-closed, and Swift bitcode checks PASS. The two-module load/link test must
-generate and pass a manifest for each module.
+fail-closed, local actor, cross-module actor extension, and Swift bitcode checks
+PASS. The two-module load/link test must generate and pass a manifest for each
+module.
 
 - [ ] **Step 8: Commit**
 
@@ -929,9 +934,12 @@ Leave Release unchanged. The wrapper emits Apple Swift bitcode, runs
 `generate-class-receiver-manifest.sh <input.bc> <manifest>`, invokes Homebrew
 `opt` with `IR_HOTFIX_CLASS_RECEIVER_MANIFEST=<manifest>` and
 `-passes=hotfix-instrument`, then resumes object emission. The manifest and
-transformed bitcode must be module-local derived files. Add pass ignore options
-for `Hotfix.swift` and `LLVMIRInterpreter.swift` through plugin command-line
-options or compiled defaults.
+transformed bitcode must be module-local derived files. The generated manifest
+admits verified class receivers and synchronous actor receivers, including
+cross-module actor extensions; the synchronous runtime bridge must never run a
+suspending actor patch. Add pass ignore options for `Hotfix.swift` and
+`LLVMIRInterpreter.swift` through plugin command-line options or compiled
+defaults.
 
 - [ ] **Step 5: Replace the manual ViewController demo**
 

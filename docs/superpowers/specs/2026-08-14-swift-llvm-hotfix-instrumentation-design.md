@@ -16,6 +16,7 @@ Supported function shapes:
 - Static functions that do not carry a pointer `swiftself` parameter.
 - Class instance methods whose receiver is lowered as `swiftself ptr` and whose
   exact LLVM symbol appears in the generated class receiver manifest.
+- Synchronous actor instance methods meeting the same manifest requirement.
 - Synchronous, non-generic functions.
 - `i64`, `i1`, and `void` LLVM ABI returns.
 - `i64` and `i1` LLVM ABI value arguments.
@@ -25,8 +26,8 @@ The initial implementation skips:
 - Functions belonging to the hotfix runtime or LLVM IR interpreter.
 - Swift runtime functions, declarations, compiler-generated thunks, metadata accessors, and value witnesses.
 - Struct instance methods and other value-semantic receivers.
-- Class static methods, actors, and protocol, struct, or enum methods whose
-  pointer `swiftself` does not represent a supported class instance.
+- Class static methods and protocol, struct, or enum methods whose pointer
+  `swiftself` does not represent a supported object receiver.
 - Generic functions and functions with generic metadata or witness-table parameters.
 - `async`, `throws`, `inout`, variadic, indirect-result, aggregate, floating-point, or closure ABI shapes.
 - Initializers and deinitializers unless their emitted ABI is proven safe in a later version.
@@ -46,13 +47,13 @@ therefore generates the semantic allowlist that an in-tree Swift/SIL compiler
 integration would emit directly. The generator uses pinned Homebrew `llvm-nm`
 to stream defined Swift symbols into `xcrun swift-demangle --expand`, accepts
 only callable symbols whose first nominal context is a class, rejects static
-wrappers, lifecycle entries, actors, protocols, structs, and enums, then
-sorts, deduplicates, and atomically writes exact LLVM symbols.
-Actor rejection is scoped to a real conformance descriptor/record root with a
-`ProtocolConformance` subtree whose first direct `Type` contains the subject
-`Class` and whose second direct `Type` contains the `Swift.Actor` protocol.
-Class and protocol nodes in callable argument or return types never classify
-the callable's class context as an actor.
+wrappers, lifecycle entries, protocols, structs, and enums, then sorts,
+deduplicates, and atomically writes exact LLVM symbols. Swift demangles actor
+contexts as classes, including extensions of actors defined in other modules.
+Those synchronous instance methods are intentionally accepted: an actor is a
+heap object valid as an `AnyObject` receiver. The first-nominal-context rule
+still prevents class types in callable arguments or returns from classifying a
+top-level or value-context function as an object receiver.
 
 If `IR_HOTFIX_CLASS_RECEIVER_MANIFEST` is unset, the receiver allowlist is
 empty and pointer `swiftself` functions fail closed with `unverified swiftself
@@ -130,10 +131,15 @@ Arguments use parallel buffers:
 
 - `argumentKinds` describes each slot as integer, boolean, or object receiver.
 - `argumentBits` contains fixed-width raw values.
-- `receiver` is null for top-level and static functions and contains the unretained class receiver for instance methods.
+- `receiver` is null for top-level and static functions and contains the unretained class or actor receiver for instance methods.
 - `resultBits` is caller-provided storage for a scalar result. Void functions do not read it.
 
-The bridge performs only synchronous work. A `false` return tells the trampoline to execute the original clone. The ABI contains no Swift-owned values, closures, errors, or reference-counted containers.
+The bridge performs only synchronous work. An actor trampoline runs inside the
+original actor method body after Swift has established its executor and
+isolation context; an actor patch must not suspend. Async target functions and
+async patches remain unsupported. A `false` return tells the trampoline to
+execute the original clone. The ABI contains no Swift-owned values, closures,
+errors, or reference-counted containers.
 
 ## Patch Model
 
@@ -149,7 +155,10 @@ struct HotfixPatch: Codable, Equatable {
 }
 ```
 
-Patch IR uses the configured entry function, initially `patch`. Its parameter and result types match the supported target signature. A class instance method receives a synthetic `ptr` parameter before its scalar parameters.
+Patch IR uses the configured entry function, initially `patch`. Its parameter
+and result types match the supported target signature. A class or synchronous
+actor instance method receives a synthetic `ptr` parameter before its scalar
+parameters.
 
 Examples:
 
@@ -248,8 +257,9 @@ Pass tests compile or transform small LLVM IR fixtures and assert:
 - Eligible functions gain a trampoline and original clone.
 - Calling convention and parameter attributes are preserved.
 - Integer, boolean, void, and manifest-verified class receiver shapes are marshalled correctly.
-- Class static, mutating value, actor, protocol, and nominal argument/return
-  decoys are excluded by real demangle output.
+- Local actor methods and cross-module actor extensions receive verified
+  receiver trampolines, while class static, mutating value, protocol, and
+  nominal argument/return decoys are excluded by real demangle output.
 - Unsupported ABI shapes are unchanged and report a reason.
 - Runtime declarations and generated clones are not reinstrumented.
 - Descriptor records are emitted.

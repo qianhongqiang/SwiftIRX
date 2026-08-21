@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
 FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/scalars.ll"
 SWIFT_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
+ACTOR_LIBRARY_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/actor_library.swift"
+ACTOR_EXTENSION_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/actor_extension.swift"
 MANIFEST_GENERATOR="$ROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh"
 OPT="/opt/homebrew/opt/llvm@19/bin/opt"
 FILECHECK="/opt/homebrew/opt/llvm@19/bin/FileCheck"
@@ -31,6 +33,7 @@ fi
 
 find_swift_symbol() {
   local demangled_fragment="$1"
+  local symbols_file="${2:-$TEMP/swift.symbols.txt}"
   local symbol
   local demangled
   local match=""
@@ -47,13 +50,40 @@ find_swift_symbol() {
       fi
       match="$symbol"
     fi
-  done <"$TEMP/swift.symbols.txt"
+  done <"$symbols_file"
 
   if [[ -z "$match" ]]; then
     echo "error: no Swift symbol matched $demangled_fragment" >&2
     return 1
   fi
   printf '%s\n' "$match"
+}
+
+assert_receiver_instrumented() {
+  local symbol="$1"
+  local ir_file="$2"
+  local name_global
+
+  grep -Fq "define swiftcc i64 @\"$symbol\"" "$ir_file"
+  grep -Fq "define private swiftcc i64 @\"$symbol.hotfix_original\"" "$ir_file"
+  awk -v symbol="$symbol" '
+    index($0, "define swiftcc") && index($0, symbol) { in_function = 1 }
+    in_function && /call i1 @ir_hotfix_invoke/ && /i32 1, ptr %/ { found = 1 }
+    in_function && /^}/ { in_function = 0 }
+    END { exit found ? 0 : 1 }
+  ' "$ir_file"
+  name_global="$(
+    grep -F "c\"$symbol\\00\"" "$ir_file" |
+      sed -E 's/^(@[^ ]+).*/\1/'
+  )"
+  if [[ -z "$name_global" ]]; then
+    echo "error: receiver $symbol has no descriptor name constant" >&2
+    return 1
+  fi
+  grep -F 'private constant %struct.ir_hotfix_descriptor {' "$ir_file" |
+    grep -F 'i8 1, i32 1, i8 1' |
+    grep -F 'section "__DATA,__hotfix"' |
+    grep -Fq "ptr $name_global"
 }
 
 printf '%s\n' 'absentFromModule' 'instanceTarget' >"$SCALAR_MANIFEST"
@@ -213,6 +243,9 @@ ENUM_SYMBOL="$(
 ACTOR_SYMBOL="$(
   find_swift_symbol '.HotfixActorFixture.actorTarget('
 )"
+ACTOR_EXECUTOR_SYMBOL="$(
+  find_swift_symbol '.HotfixActorFixture.unownedExecutor.getter'
+)"
 PROTOCOL_SYMBOL="$(
   find_swift_symbol '.HotfixProtocolFixture.protocolTarget('
 )"
@@ -227,12 +260,17 @@ for symbol in \
   "$INSTANCE_SYMBOL" \
   "$STATIC_SYMBOL" \
   "$ACTOR_ARGUMENT_SYMBOL" \
-  "$STRUCT_SYMBOL"; do
+  "$STRUCT_SYMBOL" \
+  "$ACTOR_SYMBOL"; do
   grep -F "$symbol" "$TEMP/swift.input.ll" | grep -Fq 'swiftself'
 done
 
 "$MANIFEST_GENERATOR" "$TEMP/swift.input.bc" "$TEMP/swift.manifest"
-printf '%s\n' "$INSTANCE_SYMBOL" "$ACTOR_ARGUMENT_SYMBOL" |
+printf '%s\n' \
+  "$INSTANCE_SYMBOL" \
+  "$ACTOR_ARGUMENT_SYMBOL" \
+  "$ACTOR_SYMBOL" \
+  "$ACTOR_EXECUTOR_SYMBOL" |
   LC_ALL=C sort -u >"$TEMP/swift.expected-manifest"
 if ! cmp -s "$TEMP/swift.expected-manifest" "$TEMP/swift.manifest"; then
   echo "error: generated class receiver manifest contained unexpected symbols" >&2
@@ -243,7 +281,6 @@ for symbol in \
   "$STATIC_SYMBOL" \
   "$STRUCT_SYMBOL" \
   "$ENUM_SYMBOL" \
-  "$ACTOR_SYMBOL" \
   "$PROTOCOL_SYMBOL" \
   "$CLASS_ARGUMENT_SYMBOL" \
   "$CLASS_RETURN_SYMBOL"; do
@@ -276,10 +313,8 @@ IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$TEMP/swift.manifest" "$OPT" \
   -o "$TEMP/swift.transformed.bc" \
   2>"$TEMP/swift.stderr"
 "$LLVM_DIS" "$TEMP/swift.transformed.bc" -o "$TEMP/swift.transformed.ll"
-grep -Fq "define swiftcc i64 @\"$INSTANCE_SYMBOL\"" "$TEMP/swift.transformed.ll"
-grep -Fq "define private swiftcc i64 @\"$INSTANCE_SYMBOL.hotfix_original\"" "$TEMP/swift.transformed.ll"
-grep -Eq 'call i1 @ir_hotfix_invoke\(i64 [^,]+, i64 [^,]+, ptr [^,]+, ptr [^,]+, i32 1, ptr %[^,]+, ptr %[^)]+\)' "$TEMP/swift.transformed.ll"
-grep -Eq 'private constant %struct\.ir_hotfix_descriptor \{ i64 [^,]+, i64 [^,]+, i8 1, i32 1, i8 1, ptr [^,]+, ptr [^}]+\}, section "__DATA,__hotfix"' "$TEMP/swift.transformed.ll"
+assert_receiver_instrumented "$INSTANCE_SYMBOL" "$TEMP/swift.transformed.ll"
+assert_receiver_instrumented "$ACTOR_SYMBOL" "$TEMP/swift.transformed.ll"
 for symbol in "$STATIC_SYMBOL" "$STRUCT_SYMBOL"; do
   grep -Fq "define swiftcc i64 @\"$symbol\"" "$TEMP/swift.transformed.ll"
   if grep -Fq "$symbol.hotfix_original" "$TEMP/swift.transformed.ll"; then
@@ -308,3 +343,50 @@ fi
 grep -Fq \
   "[HotfixPass] skip $ACTOR_ARGUMENT_SYMBOL: unsupported non-receiver pointer argument" \
   "$TEMP/swift.stderr"
+
+xcrun swiftc \
+  -emit-module \
+  -parse-as-library \
+  -module-name ActorLib \
+  "$ACTOR_LIBRARY_FIXTURE" \
+  -emit-module-path "$TEMP/ActorLib.swiftmodule"
+xcrun swiftc \
+  -O \
+  -emit-bc \
+  -parse-as-library \
+  -module-name ActorExtension \
+  -I "$TEMP" \
+  "$ACTOR_EXTENSION_FIXTURE" \
+  -o "$TEMP/actor-extension.input.bc"
+"$LLVM_DIS" \
+  "$TEMP/actor-extension.input.bc" \
+  -o "$TEMP/actor-extension.input.ll"
+"$LLVM_NM" --defined-only --just-symbol-name "$TEMP/actor-extension.input.bc" |
+  sed -n 's/^_\(\$s.*\)$/\1/p' |
+  LC_ALL=C sort -u >"$TEMP/actor-extension.symbols.txt"
+EXTERNAL_ACTOR_SYMBOL="$(
+  find_swift_symbol \
+    '.ExternalActor.externalActorTarget(' \
+    "$TEMP/actor-extension.symbols.txt"
+)"
+grep -F "$EXTERNAL_ACTOR_SYMBOL" "$TEMP/actor-extension.input.ll" |
+  grep -Fq 'swiftself'
+"$MANIFEST_GENERATOR" \
+  "$TEMP/actor-extension.input.bc" \
+  "$TEMP/actor-extension.manifest"
+if [[ "$(<"$TEMP/actor-extension.manifest")" != "$EXTERNAL_ACTOR_SYMBOL" ]]; then
+  echo "error: generated manifest omitted the external actor extension" >&2
+  exit 1
+fi
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$TEMP/actor-extension.manifest" "$OPT" \
+  -load-pass-plugin "$PLUGIN" \
+  -passes=hotfix-instrument \
+  -verify-each \
+  "$TEMP/actor-extension.input.bc" \
+  -o "$TEMP/actor-extension.transformed.bc"
+"$LLVM_DIS" \
+  "$TEMP/actor-extension.transformed.bc" \
+  -o "$TEMP/actor-extension.transformed.ll"
+assert_receiver_instrumented \
+  "$EXTERNAL_ACTOR_SYMBOL" \
+  "$TEMP/actor-extension.transformed.ll"
