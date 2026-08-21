@@ -1,0 +1,227 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly EXPECTED_SWIFT_IDENTITY="Apple Swift version 6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)"
+readonly EXPECTED_LLVM_VERSION="19.1.7"
+readonly SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+readonly ROOT="$(cd "$(dirname "$SELF")/../.." && pwd)"
+readonly REAL_SWIFTC="${IR_HOTFIX_REAL_SWIFTC:-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc}"
+readonly REAL_FRONTEND="${IR_HOTFIX_REAL_FRONTEND:-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift-frontend}"
+readonly SWIFT_RESOURCE_DIR="${IR_HOTFIX_SWIFT_RESOURCE_DIR:-$(dirname "$REAL_SWIFTC")/../lib/swift}"
+readonly LLVM_ROOT="${IR_HOTFIX_LLVM_ROOT:-/opt/homebrew/opt/llvm@19/bin}"
+readonly LLVM_CONFIG="${IR_HOTFIX_LLVM_CONFIG:-$LLVM_ROOT/llvm-config}"
+readonly OPT="${IR_HOTFIX_OPT:-$LLVM_ROOT/opt}"
+readonly LLC="${IR_HOTFIX_LLC:-$LLVM_ROOT/llc}"
+readonly MANIFEST_GENERATOR="${IR_HOTFIX_MANIFEST_GENERATOR:-$ROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh}"
+
+diagnose() {
+  printf '[HotfixWrapper] %s\n' "$*" >&2
+}
+
+fail() {
+  diagnose "error: $*"
+  exit 1
+}
+
+contains_argument() {
+  local expected="$1"
+  shift
+  local argument
+  for argument in "$@"; do
+    if [[ "$argument" == "$expected" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! contains_argument -frontend "$@"; then
+  [[ -x "$REAL_SWIFTC" ]] || fail "real Apple swiftc is not executable: $REAL_SWIFTC"
+  if [[ "$REAL_SWIFTC" == "$SELF" ]]; then
+    fail "real Apple swiftc resolves to the wrapper; set IR_HOTFIX_REAL_SWIFTC"
+  fi
+  for query in --version -version -help --help -print-target-info; do
+    if contains_argument "$query" "$@"; then
+      exec env -u SWIFT_EXEC "$REAL_SWIFTC" "$@"
+    fi
+  done
+  [[ -d "$SWIFT_RESOURCE_DIR" ]] || fail "Swift resource directory does not exist: $SWIFT_RESOURCE_DIR"
+  exec env -u SWIFT_EXEC "$REAL_SWIFTC" \
+    -resource-dir "$SWIFT_RESOURCE_DIR" \
+    -driver-use-frontend-path "$SELF" "$@"
+fi
+
+[[ -x "$REAL_FRONTEND" ]] || fail "real Apple swift-frontend is not executable: $REAL_FRONTEND"
+
+if ! contains_argument -c "$@" && ! contains_argument -emit-object "$@"; then
+  exec "$REAL_FRONTEND" "$@"
+fi
+
+primary_file=""
+primary_filelist=""
+output_file=""
+output_filelist=""
+swift_inputs=()
+arguments=("$@")
+
+for ((index = 0; index < ${#arguments[@]}; ++index)); do
+  argument="${arguments[index]}"
+  case "$argument" in
+    -primary-file)
+      ((index + 1 < ${#arguments[@]})) || fail "-primary-file has no value"
+      [[ -z "$primary_file" && -z "$primary_filelist" ]] ||
+        fail "ambiguous compile job with multiple primary inputs"
+      primary_file="${arguments[++index]}"
+      ;;
+    -primary-filelist)
+      ((index + 1 < ${#arguments[@]})) || fail "-primary-filelist has no value"
+      [[ -z "$primary_file" && -z "$primary_filelist" ]] ||
+        fail "ambiguous compile job with multiple primary inputs"
+      primary_filelist="${arguments[++index]}"
+      ;;
+    -o)
+      ((index + 1 < ${#arguments[@]})) || fail "-o has no value"
+      [[ -z "$output_file" && -z "$output_filelist" ]] ||
+        fail "ambiguous compile job with multiple outputs"
+      output_file="${arguments[++index]}"
+      ;;
+    -output-filelist)
+      ((index + 1 < ${#arguments[@]})) || fail "-output-filelist has no value"
+      [[ -z "$output_file" && -z "$output_filelist" ]] ||
+        fail "ambiguous compile job with multiple outputs"
+      output_filelist="${arguments[++index]}"
+      ;;
+    *.swift)
+      swift_inputs+=("$argument")
+      ;;
+  esac
+done
+
+read_single_line_file() {
+  local path="$1"
+  local description="$2"
+  [[ -r "$path" ]] || fail "$description is not readable: $path"
+  local lines=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] || lines+=("$line")
+  done <"$path"
+  [[ "${#lines[@]}" == 1 ]] ||
+    fail "$description must contain exactly one non-empty line: $path"
+  printf '%s\n' "${lines[0]}"
+}
+
+if [[ -n "$primary_filelist" ]]; then
+  primary_file="$(read_single_line_file "$primary_filelist" "primary file list")"
+elif [[ -z "$primary_file" ]]; then
+  [[ "${#swift_inputs[@]}" == 1 ]] ||
+    fail "object compile job has no unique primary Swift source"
+  primary_file="${swift_inputs[0]}"
+fi
+
+if [[ -n "$output_filelist" ]]; then
+  output_file="$(read_single_line_file "$output_filelist" "output file list")"
+fi
+[[ -n "$output_file" ]] || fail "object compile job has no output path"
+
+case "$(basename "$primary_file")" in
+  Hotfix.swift | LLVMIRInterpreter.swift)
+    diagnose "forwarding excluded source: $primary_file"
+    exec "$REAL_FRONTEND" "$@"
+    ;;
+esac
+
+[[ -x "$LLVM_CONFIG" ]] || fail "Homebrew llvm-config is not executable: $LLVM_CONFIG"
+[[ -x "$OPT" ]] || fail "Homebrew opt is not executable: $OPT"
+[[ -x "$LLC" ]] || fail "Homebrew llc is not executable: $LLC"
+[[ -x "$MANIFEST_GENERATOR" ]] || fail "receiver manifest generator is not executable: $MANIFEST_GENERATOR"
+
+swift_identity="$("$REAL_SWIFTC" --version 2>/dev/null | sed -n '/^Apple Swift version /p')"
+[[ "$swift_identity" == "$EXPECTED_SWIFT_IDENTITY" ]] || {
+  diagnose "error: expected $EXPECTED_SWIFT_IDENTITY"
+  diagnose "found: ${swift_identity:-unknown Swift compiler}"
+  exit 1
+}
+llvm_version="$("$LLVM_CONFIG" --version)"
+[[ "$llvm_version" == "$EXPECTED_LLVM_VERSION" ]] ||
+  fail "expected Homebrew LLVM $EXPECTED_LLVM_VERSION, found $llvm_version"
+
+plugin="${IR_HOTFIX_PLUGIN_PATH:-${IR_HOTFIX_PLUGIN:-}}"
+if [[ -z "$plugin" ]]; then
+  derived_file_dir="${DERIVED_FILE_DIR:-}"
+  if [[ -z "$derived_file_dir" ]]; then
+    build_cursor="$(dirname "$output_file")"
+    while [[ "$build_cursor" != "/" && "$(basename "$build_cursor")" != *.build ]]; do
+      build_cursor="$(dirname "$build_cursor")"
+    done
+    if [[ "$(basename "$build_cursor")" == *.build ]]; then
+      derived_file_dir="$build_cursor/DerivedSources"
+    fi
+  fi
+  [[ -n "$derived_file_dir" ]] ||
+    fail "cannot locate Xcode DERIVED_FILE_DIR; set IR_HOTFIX_PLUGIN_PATH for standalone use"
+  plugin="$derived_file_dir/HotfixPassProduct/libHotfixPass.dylib"
+fi
+[[ -r "$plugin" && -f "$plugin" ]] || fail "pass plugin is not readable: $plugin"
+
+temp="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-swiftc.XXXXXX")"
+atomic_output=""
+cleanup() {
+  find "$temp" -type f -delete
+  find "$temp" -depth -type d -empty -delete
+  if [[ -n "$atomic_output" && -e "$atomic_output" ]]; then
+    find "$atomic_output" -delete
+  fi
+}
+trap cleanup EXIT
+
+bitcode_arguments=()
+for ((index = 0; index < ${#arguments[@]}; ++index)); do
+  argument="${arguments[index]}"
+  case "$argument" in
+    -c | -emit-object)
+      bitcode_arguments+=("-emit-bc")
+      ;;
+    -o)
+      ((index + 1 < ${#arguments[@]})) || fail "-o has no value"
+      ((++index))
+      bitcode_arguments+=("-o" "$temp/input.bc")
+      ;;
+    -output-filelist)
+      ((index + 1 < ${#arguments[@]})) || fail "-output-filelist has no value"
+      ((++index))
+      bitcode_arguments+=("-o" "$temp/input.bc")
+      ;;
+    -stack-check)
+      ;;
+    *)
+      bitcode_arguments+=("$argument")
+      ;;
+  esac
+done
+bitcode_arguments+=("-gnone" "-no-stack-check")
+
+diagnose "instrumenting $(basename "$primary_file")"
+"$REAL_FRONTEND" "${bitcode_arguments[@]}"
+[[ -r "$temp/input.bc" ]] || fail "Apple swift-frontend did not emit bitcode"
+
+"$MANIFEST_GENERATOR" "$temp/input.bc" "$temp/receivers.txt"
+IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$temp/receivers.txt" "$OPT" \
+  -load-pass-plugin "$plugin" \
+  -passes=hotfix-instrument \
+  -verify-each \
+  "$temp/input.bc" \
+  -o "$temp/transformed.bc"
+
+output_directory="$(dirname "$output_file")"
+[[ -d "$output_directory" && -w "$output_directory" ]] ||
+  fail "object output directory is not writable: $output_directory"
+atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").hotfix.XXXXXX")"
+"$LLC" \
+  -filetype=obj \
+  -O0 \
+  -relocation-model=pic \
+  "$temp/transformed.bc" \
+  -o "$atomic_output"
+mv -f "$atomic_output" "$output_file"
+atomic_output=""

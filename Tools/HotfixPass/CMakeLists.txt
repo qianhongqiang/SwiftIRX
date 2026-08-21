@@ -14,12 +14,19 @@ add_library(HotfixPass MODULE Sources/HotfixPass.cpp)
 target_compile_features(HotfixPass PRIVATE cxx_std_20)
 target_include_directories(HotfixPass SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 
+set(
+  HOTFIX_PASS_OUTPUT_DIRECTORY
+  "${CMAKE_CURRENT_SOURCE_DIR}/.build"
+  CACHE PATH
+  "Directory for the HotfixPass plugin"
+)
+
 set_target_properties(
   HotfixPass
   PROPERTIES
     PREFIX "lib"
     SUFFIX ".dylib"
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.build"
+    LIBRARY_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
 )
 
 if(APPLE)

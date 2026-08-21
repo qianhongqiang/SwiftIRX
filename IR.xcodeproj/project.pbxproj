@@ -112,6 +112,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 7C3D7E152F6ADD7000984DDC /* Build configuration list for PBXNativeTarget "IR" */;
 			buildPhases = (
+				7C3D7E202F6ADD7000984DDC /* Build Hotfix Pass */,
 				7C3D7DE82F6ADD6E00984DDC /* Sources */,
 				7C3D7DE92F6ADD6E00984DDC /* Frameworks */,
 				7C3D7DEA2F6ADD6E00984DDC /* Resources */,
@@ -244,6 +245,27 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		7C3D7E202F6ADD7000984DDC /* Build Hotfix Pass */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 0;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Tools/HotfixPass/CMakeLists.txt",
+				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPass.cpp",
+			);
+			name = "Build Hotfix Pass";
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/HotfixPassProduct/libHotfixPass.dylib",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\nif [[ \"$CONFIGURATION\" != \"Debug\" ]]; then\n  exit 0\nfi\nLLVM_CONFIG=/opt/homebrew/opt/llvm@19/bin/llvm-config\nif [[ ! -x \"$LLVM_CONFIG\" ]]; then\n  echo \"error: Homebrew LLVM 19 llvm-config is missing: $LLVM_CONFIG\" >&2\n  exit 1\nfi\nif [[ \"$(\"$LLVM_CONFIG\" --version)\" != \"19.1.7\" ]]; then\n  echo \"error: HotfixPass requires Homebrew LLVM 19.1.7\" >&2\n  exit 1\nfi\nPRODUCT_DIR=\"$DERIVED_FILE_DIR/HotfixPassProduct\"\nHOST_SDK=\"$(xcrun --sdk macosx --show-sdk-path)\"\nHOST_ARCH=\"$(uname -m)\"\nHOST_DEPLOYMENT_TARGET=\"$(sw_vers -productVersion | awk -F. '{ print $1 \".0\" }')\"\nHOST_TARGET=\"${HOST_ARCH}-apple-macosx${HOST_DEPLOYMENT_TARGET}\"\nCMAKE_ENV=(env -u IPHONEOS_DEPLOYMENT_TARGET SDKROOT=\"$HOST_SDK\" MACOSX_DEPLOYMENT_TARGET=\"$HOST_DEPLOYMENT_TARGET\")\n\"${CMAKE_ENV[@]}\" cmake -S \"$SRCROOT/Tools/HotfixPass\" -B \"$DERIVED_FILE_DIR/HotfixPass\" -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_OSX_SYSROOT=\"$HOST_SDK\" -DCMAKE_OSX_ARCHITECTURES=\"$HOST_ARCH\" -DCMAKE_OSX_DEPLOYMENT_TARGET=\"$HOST_DEPLOYMENT_TARGET\" -DCMAKE_C_COMPILER_TARGET=\"$HOST_TARGET\" -DCMAKE_CXX_COMPILER_TARGET=\"$HOST_TARGET\" -DHOTFIX_PASS_OUTPUT_DIRECTORY=\"$PRODUCT_DIR\"\n\"${CMAKE_ENV[@]}\" cmake --build \"$DERIVED_FILE_DIR/HotfixPass\" --config Release\ntest -f \"$PRODUCT_DIR/libHotfixPass.dylib\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		7C3D7DE82F6ADD6E00984DDC /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -290,6 +312,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 9R58G3D4PK;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = IR/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -308,7 +331,10 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_ENABLE_BATCH_MODE = NO;
+				SWIFT_EXEC = "$(SRCROOT)/Tools/HotfixPass/swiftc-hotfix";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_USE_INTEGRATED_DRIVER = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};

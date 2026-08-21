@@ -911,16 +911,33 @@ Add a `PBXShellScriptBuildPhase` before `Sources` in the `IR` target. Its script
 set -euo pipefail
 LLVM_CONFIG=/opt/homebrew/opt/llvm@19/bin/llvm-config
 test "$($LLVM_CONFIG --version)" = "19.1.7"
-cmake -S "$SRCROOT/Tools/HotfixPass" \
-  -B "$DERIVED_FILE_DIR/HotfixPass" \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build "$DERIVED_FILE_DIR/HotfixPass"
-mkdir -p "$DERIVED_FILE_DIR/HotfixPassProduct"
-cp "$SRCROOT/Tools/HotfixPass/.build/libHotfixPass.dylib" \
-  "$DERIVED_FILE_DIR/HotfixPassProduct/libHotfixPass.dylib"
+HOST_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+HOST_ARCH="$(uname -m)"
+HOST_DEPLOYMENT_TARGET="$(sw_vers -productVersion | awk -F. '{ print $1 ".0" }')"
+HOST_TARGET="${HOST_ARCH}-apple-macosx${HOST_DEPLOYMENT_TARGET}"
+env -u IPHONEOS_DEPLOYMENT_TARGET \
+  SDKROOT="$HOST_SDK" \
+  MACOSX_DEPLOYMENT_TARGET="$HOST_DEPLOYMENT_TARGET" \
+  cmake -S "$SRCROOT/Tools/HotfixPass" \
+    -B "$DERIVED_FILE_DIR/HotfixPass" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_SYSTEM_NAME=Darwin \
+    -DCMAKE_OSX_SYSROOT="$HOST_SDK" \
+    -DCMAKE_OSX_ARCHITECTURES="$HOST_ARCH" \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET="$HOST_DEPLOYMENT_TARGET" \
+    -DCMAKE_C_COMPILER_TARGET="$HOST_TARGET" \
+    -DCMAKE_CXX_COMPILER_TARGET="$HOST_TARGET" \
+    -DHOTFIX_PASS_OUTPUT_DIRECTORY="$DERIVED_FILE_DIR/HotfixPassProduct"
+env -u IPHONEOS_DEPLOYMENT_TARGET \
+  SDKROOT="$HOST_SDK" \
+  MACOSX_DEPLOYMENT_TARGET="$HOST_DEPLOYMENT_TARGET" \
+  cmake --build "$DERIVED_FILE_DIR/HotfixPass"
 ```
 
 Declare the dylib as the phase output and disable user script sandboxing only for the app target because CMake needs its build directory.
+The host target and sanitized deployment environment are required because an
+iOS app build phase otherwise stamps the loadable plugin as iOS even when CMake
+uses the macOS SDK.
 
 - [ ] **Step 4: Route Debug compilation through the wrapper**
 
@@ -928,6 +945,8 @@ Set the app target Debug configuration to the wrapper implemented for the file-b
 
 ```text
 SWIFT_EXEC = $(SRCROOT)/Tools/HotfixPass/swiftc-hotfix
+SWIFT_ENABLE_BATCH_MODE = NO
+SWIFT_USE_INTEGRATED_DRIVER = NO
 ```
 
 Leave Release unchanged. The wrapper emits Apple Swift bitcode, runs
@@ -937,9 +956,19 @@ Leave Release unchanged. The wrapper emits Apple Swift bitcode, runs
 transformed bitcode must be module-local derived files. The generated manifest
 admits verified class receivers and synchronous actor receivers, including
 cross-module actor extensions; the synchronous runtime bridge must never run a
-suspending actor patch. Add pass ignore options for `Hotfix.swift` and
-`LLVMIRInterpreter.swift` through plugin command-line options or compiled
-defaults.
+suspending actor patch. Xcode 26.3's integrated driver rejects a custom compiler
+basename, so Debug uses the external driver; that driver re-enters the wrapper
+as its frontend with one primary source per object job. The wrapper forwards
+`Hotfix.swift` and `LLVMIRInterpreter.swift` unchanged by primary-source
+basename.
+
+The external LLVM boundary also requires two Debug compatibility adjustments.
+Apple debug metadata is not readable by Homebrew LLVM 19.1.7, so transformed
+objects are emitted with `-gnone`. Xcode's `-stack-check` produces the
+Apple-only `"probe-stack"="__chkstk_darwin"` attribute, which Homebrew `llc`
+rejects; the wrapper removes that option and supplies `-no-stack-check` only for
+transformed object jobs. Native excluded jobs and Release compilation retain
+Apple's normal settings.
 
 - [ ] **Step 5: Replace the manual ViewController demo**
 
@@ -947,27 +976,22 @@ Remove the embedded fallback IR and call the instrumented demo function. Registe
 
 - [ ] **Step 6: Run tests and inspect emitted IR**
 
-Run:
+Run the wrapper smoke, app tests, and inspect the actual Xcode products:
 
 ```bash
+Tools/HotfixPass/Tests/verify-wrapper.sh
 xcodebuild test -project IR.xcodeproj -scheme IR \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
   CODE_SIGNING_ALLOWED=NO
-
-xcrun swiftc -O -emit-bc -parse-as-library \
-  IR/HotfixDemo.swift -o /tmp/HotfixDemo.input.bc
-Tools/HotfixPass/generate-class-receiver-manifest.sh \
-  /tmp/HotfixDemo.input.bc /tmp/HotfixDemo.receivers
-IR_HOTFIX_CLASS_RECEIVER_MANIFEST=/tmp/HotfixDemo.receivers \
-  /opt/homebrew/opt/llvm@19/bin/opt \
-  -load-pass-plugin=Tools/HotfixPass/.build/libHotfixPass.dylib \
-  -passes=hotfix-instrument -S /tmp/HotfixDemo.input.bc \
-  -o /tmp/HotfixDemo.instrumented.ll
-rg 'ir_hotfix_invoke|hotfix_original|__DATA,__hotfix' \
-  /tmp/HotfixDemo.instrumented.ll
+/opt/homebrew/opt/llvm@19/bin/llvm-nm \
+  "$OBJECT_FILE_DIR_normal/$CURRENT_ARCH/HotfixDemo.o"
+/opt/homebrew/opt/llvm@19/bin/llvm-objdump --macho --section-headers \
+  "$OBJECT_FILE_DIR_normal/$CURRENT_ARCH/HotfixDemo.o"
 ```
 
-Expected: app tests PASS and the emitted IR shows the trampoline, native clone, and descriptor section.
+Expected: app tests PASS, `HotfixDemo.o` shows the trampoline, private native
+clone, bridge reference, and `__DATA,__hotfix`, while the two excluded objects
+contain no clone or descriptor section.
 
 - [ ] **Step 7: Commit**
 

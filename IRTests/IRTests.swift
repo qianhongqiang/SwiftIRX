@@ -48,6 +48,63 @@ private final class SynchronizedBridgeResult: @unchecked Sendable {
 
 struct IRTests {
 
+    @Test func directTopLevelCallUsesActiveHotfix() throws {
+        let suiteName = "ir.hotfix.app.add.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.app.add",
+            targetID: HotfixDemoABI.addTargetID,
+            signatureID: HotfixDemoABI.addSignatureID,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(i64 %value) {
+            entry:
+              %result = add i64 %value, 10
+              ret i64 %result
+            }
+            """
+        )
+        let runtime = HotfixRuntime(manager: manager)
+
+        try HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            #expect(hotfixableAdd(41) == 42)
+            manager.upsert(patch)
+            try manager.activatePatch(id: patch.id)
+            #expect(hotfixableAdd(41) == 51)
+        }
+    }
+
+    @Test func directClassMethodCallUsesActiveHotfix() throws {
+        let suiteName = "ir.hotfix.app.multiply.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.app.multiply",
+            targetID: HotfixDemoABI.multiplyTargetID,
+            signatureID: HotfixDemoABI.multiplySignatureID,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(ptr %self, i64 %value) {
+            entry:
+              %result = add i64 %value, 100
+              ret i64 %result
+            }
+            """
+        )
+        let runtime = HotfixRuntime(manager: manager)
+        let calculator = HotfixableCalculator()
+
+        try HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            #expect(calculator.multiply(21) == 42)
+            manager.upsert(patch)
+            try manager.activatePatch(id: patch.id)
+            #expect(calculator.multiply(21) == 121)
+        }
+    }
+
     @Test func interpretNamedFunctionWithTypedArguments() throws {
         let ir = """
         define i64 @patch(i64 %value, i1 %enabled) {
