@@ -30,6 +30,7 @@ constexpr StringLiteral OriginalSuffix = ".hotfix_original";
 constexpr StringLiteral DescriptorSection = "__DATA,__hotfix";
 constexpr StringLiteral ReceiverManifestEnvironment =
     "IR_HOTFIX_CLASS_RECEIVER_MANIFEST";
+constexpr unsigned MaximumScalarArgumentCount = 8;
 
 enum class FunctionClassification { NotCandidate, Eligible, Skipped };
 
@@ -145,6 +146,10 @@ FunctionShape classifyFunction(Function &function,
       return shape;
     }
     shape.scalarArguments.push_back(&argument);
+    if (shape.scalarArguments.size() > MaximumScalarArgumentCount) {
+      shape.skipReason = "too many scalar arguments";
+      return shape;
+    }
   }
 
   if (shape.receiver != nullptr &&

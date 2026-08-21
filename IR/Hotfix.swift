@@ -21,6 +21,10 @@ nonisolated enum HotfixValueKind: UInt8, Codable, Sendable {
     }
 }
 
+nonisolated enum HotfixABI {
+    static let maximumScalarArgumentCount: Int32 = 8
+}
+
 nonisolated enum HotfixID {
     static func fnv1a64(_ value: String) -> UInt64 {
         value.utf8.reduce(14_695_981_039_346_656_037) { hash, byte in
@@ -257,7 +261,7 @@ nonisolated enum HotfixArgumentDecoder {
         bits: UnsafePointer<UInt64>?,
         count: Int32
     ) -> [LLVMInvocationValue]? {
-        guard count >= 0 else {
+        guard count >= 0, count <= HotfixABI.maximumScalarArgumentCount else {
             return nil
         }
         guard count > 0 else {

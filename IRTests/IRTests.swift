@@ -831,6 +831,31 @@ struct IRTests {
                   ret i32 %result
                 }
                 """
+            ),
+            HotfixPatch(
+                id: "patch.bridge.too-many-arguments",
+                targetID: 16,
+                signatureID: 26,
+                entryFunction: "patch",
+                ir: """
+                define i64 @patch(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h, i64 %i) {
+                entry:
+                  ret i64 99
+                }
+                """
+            ),
+            HotfixPatch(
+                id: "patch.bridge.maximum-arguments",
+                targetID: 17,
+                signatureID: 27,
+                entryFunction: "patch",
+                ir: """
+                define i64 @patch(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h) {
+                entry:
+                  %result = add i64 %a, %h
+                  ret i64 %result
+                }
+                """
             )
         ]
         for patch in patches {
@@ -866,8 +891,33 @@ struct IRTests {
             #expect(!ir_hotfix_invoke(11, 22, &intKind, nil, 1, nil, &intResult))
             #expect(!ir_hotfix_invoke(11, 22, &unknownKind, &malformedBits, 1, nil, &intResult))
             #expect(!ir_hotfix_invoke(11, 22, &voidKind, &malformedBits, 1, nil, &intResult))
-            #expect(!ir_hotfix_invoke(11, 22, &intKind, &intBits, -1, nil, &intResult))
+            var negativeCountResult: UInt64 = 0xBEEF
+            #expect(!ir_hotfix_invoke(11, 22, &intKind, &intBits, -1, nil, &negativeCountResult))
+            #expect(negativeCountResult == 0xBEEF)
             #expect(!ir_hotfix_invoke(11, 22, &intKind, &intBits, 1, nil, nil))
+
+            #expect(HotfixABI.maximumScalarArgumentCount == 8)
+            let maximumKinds = Array(repeating: UInt8(1), count: 8)
+            let maximumBits: [UInt64] = [40, 0, 0, 0, 0, 0, 0, 2]
+            var maximumResult: UInt64 = 0
+            let appliedMaximum = maximumKinds.withUnsafeBufferPointer { kinds in
+                maximumBits.withUnsafeBufferPointer { bits in
+                    ir_hotfix_invoke(17, 27, kinds.baseAddress, bits.baseAddress, 8, nil, &maximumResult)
+                }
+            }
+            #expect(appliedMaximum)
+            #expect(maximumResult == 42)
+
+            let tooManyKinds = Array(repeating: UInt8(1), count: 9)
+            let tooManyBits = Array(repeating: UInt64(1), count: 9)
+            var tooManyResult: UInt64 = 0xCAFE
+            let appliedTooMany = tooManyKinds.withUnsafeBufferPointer { kinds in
+                tooManyBits.withUnsafeBufferPointer { bits in
+                    ir_hotfix_invoke(16, 26, kinds.baseAddress, bits.baseAddress, 9, nil, &tooManyResult)
+                }
+            }
+            #expect(!appliedTooMany)
+            #expect(tooManyResult == 0xCAFE)
 
             var invalidBoolBits: UInt64 = 2
             #expect(!ir_hotfix_invoke(12, 23, &boolKind, &invalidBoolBits, 1, nil, &boolResult))

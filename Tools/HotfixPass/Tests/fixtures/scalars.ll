@@ -13,7 +13,10 @@
 ; CHECK: @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [15 x i8] c"instanceTarget\00"
 ; CHECK: @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [1 x i8] c"\01"
 ; CHECK: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.ir_hotfix_descriptor { i64 5668467115194567859, i64 -6621454702738333650, i8 1, i32 1, i8 1, ptr @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e, ptr @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e }, section "__DATA,__hotfix"
-; CHECK: @llvm.used = appending global [9 x ptr]
+; CHECK: @__ir_hotfix_name.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant [21 x i8] c"eightScalarArguments\00"
+; CHECK: @__ir_hotfix_kinds.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant [8 x i8] c"\01\02\01\02\01\02\01\02"
+; CHECK: @__ir_hotfix_descriptor.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant %struct.ir_hotfix_descriptor { i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}}, i8 1, i32 8, i8 1, ptr @__ir_hotfix_name.{{[0-9a-f]+}}.{{[0-9a-f]+}}, ptr @__ir_hotfix_kinds.{{[0-9a-f]+}}.{{[0-9a-f]+}} }, section "__DATA,__hotfix"
+; CHECK: @llvm.used = appending global [10 x ptr]
 ; CHECK-SAME: ptr @__ir_hotfix_descriptor.37465577a37332e8.a41bdf07a2f121e1,
 ; CHECK-SAME: ptr @__ir_hotfix_descriptor.e73de7cd22608c82.9252519d49927f55,
 ; CHECK-SAME: ptr @__ir_hotfix_descriptor.074ae953e60d8322.bf285a56b83c0d68,
@@ -78,6 +81,15 @@
 ; CHECK: [[INSTANCE_FALLBACK]]:
 ; CHECK: %[[INSTANCE_NATIVE:[^ ]+]] = call swiftcc i64 @instanceTarget.hotfix_original(i64 %value, ptr nocapture readnone swiftself %self)
 ; CHECK: ret i64 %[[INSTANCE_NATIVE]]
+
+; CHECK-LABEL: define swiftcc i64 @eightScalarArguments(
+; CHECK: call i1 @ir_hotfix_invoke({{.*}}i32 8, ptr %self,
+; CHECK: call swiftcc i64 @eightScalarArguments.hotfix_original(
+
+; CHECK-LABEL: define swiftcc i64 @nineScalarArguments(
+; CHECK-NOT: call i1 @ir_hotfix_invoke
+; CHECK-NOT: @nineScalarArguments.hotfix_original
+; CHECK: ret i64 %a
 
 ; CHECK-LABEL: define swiftcc i64 @unverifiedReceiver(
 ; CHECK-SAME: i64 %value, ptr nocapture readnone swiftself %self) {
@@ -188,6 +200,7 @@
 ; NO-CLONES-NOT: @variadicTarget.hotfix_original
 ; NO-CLONES-NOT: @unsupportedPointer.hotfix_original
 ; NO-CLONES-NOT: @unverifiedReceiver.hotfix_original
+; NO-CLONES-NOT: @nineScalarArguments.hotfix_original
 
 ; NO-MANIFEST: define swiftcc i64 @integerTarget
 ; NO-MANIFEST: call i1 @ir_hotfix_invoke
@@ -200,7 +213,12 @@
 
 ; AUTO: define swiftcc i64 @integerTarget
 ; AUTO: call i1 @ir_hotfix_invoke
+; AUTO: define swiftcc i64 @eightScalarArguments
+; AUTO: call i1 @ir_hotfix_invoke({{.*}}i32 8, ptr %self,
+; AUTO: define swiftcc i64 @nineScalarArguments
 ; AUTO: define private swiftcc i64 @integerTarget.hotfix_original
+; AUTO: define private swiftcc i64 @eightScalarArguments.hotfix_original
+; AUTO-NOT: @nineScalarArguments.hotfix_original
 
 ; OPT-LABEL: define i64 @callSemanticTwice(
 ; OPT: %first = {{(tail )?}}call swiftcc i64 @semanticTarget(i64 %value)
@@ -221,8 +239,9 @@
 ; RETAIN: @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [15 x i8] c"instanceTarget\00"
 ; RETAIN: @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [1 x i8] c"\01"
 ; RETAIN: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.ir_hotfix_descriptor {{.*}}section "__DATA,__hotfix"
-; RETAIN: @llvm.compiler.used = appending global [18 x ptr]
+; RETAIN: @llvm.compiler.used = appending global [20 x ptr]
 ; RETAIN-SAME: ptr @booleanTarget, ptr @booleanTarget.hotfix_original,
+; RETAIN-SAME: ptr @eightScalarArguments, ptr @eightScalarArguments.hotfix_original,
 ; RETAIN-SAME: ptr @instanceTarget, ptr @instanceTarget.hotfix_original,
 ; RETAIN-SAME: ptr @integerTarget, ptr @integerTarget.hotfix_original,
 ; RETAIN-SAME: ptr @internalTarget, ptr @internalTarget.hotfix_original,
@@ -277,6 +296,16 @@ define swiftcc i64 @instanceTarget(i64 %value, ptr nocapture readnone swiftself 
 entry:
   %sum = add i64 %value, 3
   ret i64 %sum
+}
+
+define swiftcc i64 @eightScalarArguments(i64 %a, i1 %b, i64 %c, i1 %d, i64 %e, i1 %f, i64 %g, i1 %h, ptr swiftself %self) {
+entry:
+  ret i64 %a
+}
+
+define swiftcc i64 @nineScalarArguments(i64 %a, i1 %b, i64 %c, i1 %d, i64 %e, i1 %f, i64 %g, i1 %h, i64 %i) {
+entry:
+  ret i64 %a
 }
 
 define swiftcc i64 @unverifiedReceiver(i64 %value, ptr nocapture readnone swiftself %self) {
