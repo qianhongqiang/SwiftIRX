@@ -206,9 +206,18 @@ Before execution, the runtime validates:
 - An active patch exists for the target ID.
 - The patch signature ID equals the trampoline signature ID.
 - The declared entry function exists.
-- Argument and return types match the entry function.
+- Supplied argument types match the entry function parameters.
 
-The bridge returns `false` for a missing patch, signature mismatch, parse error, runtime error, step-limit failure, or result mismatch. The native original implementation then runs synchronously. Interpreter failures are currently suppressed with `try?`; the prototype does not expose a runtime diagnostic hook.
+The bridge returns `false` for a missing patch, signature mismatch, parse error,
+runtime error, step-limit failure, argument mismatch, unsupported result, or a
+void-versus-scalar result mismatch. The native original implementation then runs
+synchronously. The current implementation does not cross-check an `i64` patch
+result with an `i1` target return kind or vice versa: the bridge encodes the
+actual patch value, after which an `i1` trampoline truncates raw bits and an
+`i64` trampoline observes a boolean as zero or one. Patch authors must make the
+IR return kind agree with the return kind used to compute the canonical
+signature. Interpreter failures are currently suppressed with `try?`; the
+prototype does not expose a runtime diagnostic hook.
 
 A thread-local set of active target IDs prevents a patch from recursively re-entering the same target. Nested patches for different target IDs remain allowed.
 

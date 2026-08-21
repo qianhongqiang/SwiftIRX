@@ -84,10 +84,9 @@ The `IR` target has two intentionally different compilation paths:
 | Release | Xcode uses its native Apple Swift compiler path. The wrapper, bridging-header fingerprint, and pass build phase do not instrument Release objects. |
 
 The wrapper recursively expands frontend `@response-file` arguments before it
-identifies the primary source and output. Quoting, escaped characters, nested
-files, paths containing spaces, missing files, and cycles are covered by the
-wrapper test. Relative response paths are resolved from the frontend process's
-working directory.
+identifies the primary source and output. Quoting, nested files, paths containing
+spaces, missing files, and cycles are covered by the wrapper test. Relative
+response paths are resolved from the frontend process's working directory.
 
 The Debug build phase hashes `CMakeLists.txt`, `HotfixPass.cpp`, the receiver
 manifest generator, and the wrapper into
@@ -188,6 +187,12 @@ live object in `LLVMHostContext`. Pointer zero resolves to that object for the
 supported Objective-C/UIKit bridges. Patch execution is synchronous and the
 receiver is not retained. UIKit bridging requires the main thread.
 
+The patch author must make the entry return kind agree with the canonical
+signature return kind. The runtime checks entry parameter types, but it does not
+currently cross-check an `i64` patch result against an `i1` target or vice versa.
+An `i1` result used by an `i64` trampoline becomes `0` or `1`; an `i64` result
+used by an `i1` trampoline is truncated by that trampoline.
+
 ## Supported ABI envelope
 
 The pass classifies lowered LLVM ABI, not Swift source spelling.
@@ -205,10 +210,10 @@ The pass stops collecting at the ninth scalar, prints
 bridge independently rejects a negative or greater-than-eight
 `argumentCount` before reading the argument buffers.
 
-Unsupported shapes include:
+Shapes that normally lower outside the supported envelope include:
 
-- `String`, `Array`, structs, enums, tuples, floating-point values, closures,
-  and other aggregate or reference-counted Swift values.
+- `String`, `Array`, tuples, floating-point values, closures, and other
+  aggregate or reference-counted Swift values.
 - Any ordinary pointer argument, including class/object arguments that are not
   the one verified receiver; pointer returns are also unsupported.
 - Unverified `swiftself`, multiple or malformed receivers, value-semantic
@@ -217,10 +222,12 @@ Unsupported shapes include:
   variadic functions or patches.
 - More than eight scalar arguments.
 
-Most unsupported Swift forms lower to a pointer, aggregate, unsupported return,
-or variadic LLVM shape and receive a deterministic skip diagnostic. This
-prototype does not promise source-level semantic recognition: code is supported
-only when the emitted ABI exactly matches the table.
+Source spelling alone does not make a Swift type unsupported. With the pinned
+compiler, a single-field struct or single-payload enum can lower to `i64` and be
+instrumented as a scalar; the pass preserves no struct/enum semantic tag for the
+patch. A definition is skipped only when its emitted LLVM ABI falls outside the
+table, for example through a pointer, aggregate, unsupported return, or variadic
+shape. This prototype does not promise source-level semantic recognition.
 
 The receiver manifest is fail closed. With no manifest, scalar-only functions
 can still be instrumented but every pointer `swiftself` is unverified. A
@@ -237,10 +244,12 @@ only when that bridge returns `true`; otherwise it calls the native clone with
 the untouched Swift ABI values.
 
 Fallback covers no active patch, a target/signature mismatch, malformed IR,
-missing entry function, parameter/result mismatch, interpreter error, step-limit
-failure, invalid bridge buffers, and unsupported result encoding. These
-conditions fail closed without crashing the target function. The current
-runtime uses `try?` for interpreter failures; it does not expose a production
+missing entry function, entry parameter mismatch, interpreter error, step-limit
+failure, invalid bridge buffers, void-versus-scalar result mismatch, and
+unsupported result encoding. These conditions fail closed without crashing the
+target function. An `i64`/`i1` result mismatch is not in this list because it is
+not rejected today; it is encoded as described above. The current runtime uses
+`try?` for interpreter failures and does not expose a production
 diagnostic/reporting hook.
 
 Direct recursive calls inside the native clone are rewritten to call the clone,
