@@ -21,6 +21,8 @@ nonisolated enum LLVMInvocationResult: Equatable, Sendable {
     case void
 }
 
+private nonisolated let llvmMaximumAggregateElementCount = 1_024
+
 nonisolated private func llvmStableSymbolAddress(_ symbol: String) -> Int {
     var hash = 5381
     for scalar in symbol.unicodeScalars {
@@ -81,10 +83,14 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                 return LLVMValue.pointer(value)
             }
         }
+        let budget = LLVMExecutionBudget()
+        try budget.enterFunction()
+        defer { budget.leaveFunction() }
         let result = try execute(
             function: function,
             module: module,
             state: LLVMRuntimeState(),
+            budget: budget,
             arguments: runtimeArguments,
             host: host
         )
@@ -127,6 +133,7 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         function: LLVMFunction,
         module: LLVMModule,
         state: LLVMRuntimeState,
+        budget: LLVMExecutionBudget,
         arguments: [LLVMValue],
         host: LLVMHostContext?
     ) throws -> LLVMValue? {
@@ -149,17 +156,20 @@ nonisolated final class LLVMIRInterpreter: Sendable {
             }
             env[parameter.name] = value
         }
-        let blockMap = Dictionary(uniqueKeysWithValues: function.blocks.map { ($0.label, $0) })
+        var blockMap: [String: LLVMBasicBlock] = [:]
+        for block in function.blocks {
+            guard blockMap[block.label] == nil else {
+                throw LLVMIRInterpreterError.runtime(
+                    "Duplicate basic block label %\(block.label) in function @\(function.name)."
+                )
+            }
+            blockMap[block.label] = block
+        }
         var currentLabel = entry
         var predecessor: String?
-        var stepCount = 0
-        let stepLimit = 200_000
 
         while true {
-            stepCount += 1
-            if stepCount > stepLimit {
-                throw LLVMIRInterpreterError.runtime("Step limit exceeded. Possible infinite loop.")
-            }
+            try budget.consumeStep()
 
             guard let block = blockMap[currentLabel] else {
                 throw LLVMIRInterpreterError.runtime("Unknown block label %\(currentLabel).")
@@ -250,6 +260,9 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                         env[result] = value
                     }
                 case let .insertvalue(result, aggregate, element, index):
+                    guard index >= 0, index < llvmMaximumAggregateElementCount else {
+                        throw LLVMIRInterpreterError.runtime("insertvalue index out of range.")
+                    }
                     let elementValue = try resolve(operand: element, env: env)
                     if case .undef = aggregate {
                         if index == 0 {
@@ -314,13 +327,19 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                                 "Call return type mismatch for function @\(functionName)."
                             )
                         }
-                        let callResult = try execute(
-                            function: callee,
-                            module: module,
-                            state: state,
-                            arguments: resolvedArguments,
-                            host: host
-                        )
+                        try budget.enterFunction()
+                        let callResult: LLVMValue?
+                        do {
+                            defer { budget.leaveFunction() }
+                            callResult = try execute(
+                                function: callee,
+                                module: module,
+                                state: state,
+                                budget: budget,
+                                arguments: resolvedArguments,
+                                host: host
+                            )
+                        }
                         try bindCallResult(
                             resultName: result,
                             functionName: functionName,
@@ -828,6 +847,33 @@ private nonisolated struct LLVMModule {
 }
 
 // Each instance is confined to one synchronous interpreter invocation.
+private nonisolated final class LLVMExecutionBudget: @unchecked Sendable {
+    private static let stepLimit = 200_000
+    private static let callDepthLimit = 4
+
+    private var stepCount = 0
+    private var callDepth = 0
+
+    func consumeStep() throws {
+        stepCount += 1
+        guard stepCount <= Self.stepLimit else {
+            throw LLVMIRInterpreterError.runtime("Step limit exceeded. Possible infinite loop.")
+        }
+    }
+
+    func enterFunction() throws {
+        guard callDepth < Self.callDepthLimit else {
+            throw LLVMIRInterpreterError.runtime("Call depth limit exceeded.")
+        }
+        callDepth += 1
+    }
+
+    func leaveFunction() {
+        callDepth -= 1
+    }
+}
+
+// Each instance is confined to one synchronous interpreter invocation.
 private nonisolated final class LLVMRuntimeState: @unchecked Sendable {
     var memory: [Int: LLVMValue] = [:]
     var nextAddress = 1
@@ -1074,6 +1120,14 @@ private nonisolated struct LLVMIRParser {
 
             if blocks.isEmpty {
                 throw LLVMIRInterpreterError.parse("Function @\(functionHeader.name) has no basic blocks.")
+            }
+            var blockLabels = Set<String>()
+            for block in blocks {
+                guard blockLabels.insert(block.label).inserted else {
+                    throw LLVMIRInterpreterError.parse(
+                        "Duplicate basic block label %\(block.label) in function @\(functionHeader.name)."
+                    )
+                }
             }
             functions[functionHeader.name] = LLVMFunction(
                 name: functionHeader.name,
@@ -1763,7 +1817,7 @@ private nonisolated struct LLVMIRParser {
             return .int(value)
         case .i32:
             guard let value = Int(trimmed) else {
-                if let floating = Double(trimmed) { return .int(Int(floating)) }
+                if let floating = parseExactIntegerFallback(trimmed) { return .int(floating) }
                 if trimmed.hasPrefix("ptrtoint") {
                     return .int(0)
                 }
@@ -1775,7 +1829,7 @@ private nonisolated struct LLVMIRParser {
             return .int(value)
         case .i64:
             guard let value = Int(trimmed) else {
-                if let floating = Double(trimmed) { return .int(Int(floating)) }
+                if let floating = parseExactIntegerFallback(trimmed) { return .int(floating) }
                 if trimmed.hasPrefix("ptrtoint") {
                     return .int(0)
                 }
@@ -1802,6 +1856,15 @@ private nonisolated struct LLVMIRParser {
             }
             throw LLVMIRInterpreterError.parse("Invalid ptr operand: \(raw)")
         }
+    }
+
+    private func parseExactIntegerFallback(_ raw: String) -> Int? {
+        guard let floating = Double(raw),
+              floating.isFinite,
+              floating.rounded(.towardZero) == floating else {
+            return nil
+        }
+        return Int(exactly: floating)
     }
 
     private func extractOperandToken(from raw: String) -> String {

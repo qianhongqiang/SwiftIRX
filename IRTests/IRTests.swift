@@ -247,6 +247,107 @@ struct IRTests {
         }
     }
 
+    @Test func rejectDuplicateBasicBlockLabels() {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          br label %entry
+        entry:
+          ret i64 1
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.parse("Duplicate basic block label %entry in function @patch.")) {
+            try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+        }
+    }
+
+    @Test func rejectRecursiveFunctionCall() {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %result = call i64 @patch()
+          ret i64 %result
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.runtime("Call depth limit exceeded.")) {
+            try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+        }
+    }
+
+    @Test func rejectMutuallyRecursiveFunctionCalls() {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %result = call i64 @helper()
+          ret i64 %result
+        }
+
+        define i64 @helper() {
+        entry:
+          %result = call i64 @patch()
+          ret i64 %result
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.runtime("Call depth limit exceeded.")) {
+            try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+        }
+    }
+
+    @Test func finiteFunctionCallChainSucceeds() throws {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %result = call i64 @first()
+          ret i64 %result
+        }
+
+        define i64 @first() {
+        entry:
+          %result = call i64 @second()
+          ret i64 %result
+        }
+
+        define i64 @second() {
+        entry:
+          ret i64 42
+        }
+        """
+
+        let result = try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+
+        #expect(result == .int(42))
+    }
+
+    @Test func functionCallsShareExecutionBudget() {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %first = call i64 @spin(i64 99999)
+          %second = call i64 @spin(i64 99999)
+          ret i64 %second
+        }
+
+        define i64 @spin(i64 %limit) {
+        entry:
+          br label %loop
+        loop:
+          %value = phi i64 [ 0, %entry ], [ %next, %loop ]
+          %next = add i64 %value, 1
+          %done = icmp eq i64 %next, %limit
+          br i1 %done, label %exit, label %loop
+        exit:
+          ret i64 %next
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.runtime("Step limit exceeded. Possible infinite loop.")) {
+            try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+        }
+    }
+
     @Test func interpretArithmeticProgram() throws {
         let ir = """
         define i32 @main() {
@@ -535,6 +636,73 @@ struct IRTests {
         #expect(result == 1)
     }
 
+    @Test func rejectUnsafeInsertValueIndices() {
+        let indices = ["-1", String(Int.max), "1024", "1000000"]
+
+        for index in indices {
+            let ir = """
+            define i64 @patch() {
+            entry:
+              %value = insertvalue %aggregate undef, i64 42, \(index)
+              ret i64 0
+            }
+            """
+
+            #expect(throws: LLVMIRInterpreterError.runtime("insertvalue index out of range.")) {
+                try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+            }
+        }
+    }
+
+    @Test func rejectUnsafeInsertValueIndexWhenGrowingAggregate() {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %first = insertvalue %aggregate undef, i64 1, 0
+          %second = insertvalue %aggregate %first, i64 2, 1024
+          ret i64 0
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.runtime("insertvalue index out of range.")) {
+            try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+        }
+    }
+
+    @Test func rejectUnsafeFloatingIntegerOperands() {
+        let operands = ["nan", "inf", "-inf", "1e999", "9.223372036854776e18", "1.5"]
+
+        for type in ["i32", "i64"] {
+            for operand in operands {
+                let ir = """
+                define \(type) @patch() {
+                entry:
+                  ret \(type) \(operand)
+                }
+                """
+
+                #expect(throws: LLVMIRInterpreterError.parse("Invalid \(type) operand: \(operand)")) {
+                    try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+                }
+            }
+        }
+    }
+
+    @Test func interpretExactFloatingIntegerOperands() throws {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %zero = add i64 0, 0.000e+00
+          %result = add i64 %zero, 100e+00
+          ret i64 %result
+        }
+        """
+
+        let result = try LLVMIRInterpreter().run(ir: ir, function: "patch", arguments: [])
+
+        #expect(result == .int(100))
+    }
+
     @Test func interpretGetElementPtrProgram() throws {
         let ir = """
         define i32 @main() {
@@ -728,6 +896,118 @@ struct IRTests {
         )
 
         #expect(result == nil)
+    }
+
+    @Test func malformedPatchFallsBackWithoutChangingBridgeResult() throws {
+        let suiteName = "ir.hotfix.malformed.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.malformed",
+            targetID: 31,
+            signatureID: 32,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch() {
+            entry:
+              br label %entry
+            entry:
+              ret i64 1
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+        let runtime = HotfixRuntime(manager: manager)
+
+        #expect(runtime.invoke(targetID: 31, signatureID: 32, arguments: [], receiver: nil) == nil)
+        HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            var result: UInt64 = 0xBEEF
+            #expect(!ir_hotfix_invoke(31, 32, nil, nil, 0, nil, &result))
+            #expect(result == 0xBEEF)
+        }
+    }
+
+    @Test func recursivePatchFallsBackWithoutChangingBridgeResult() throws {
+        let suiteName = "ir.hotfix.recursive.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.recursive",
+            targetID: 33,
+            signatureID: 34,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch() {
+            entry:
+              %result = call i64 @patch()
+              ret i64 %result
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+        let runtime = HotfixRuntime(manager: manager)
+
+        #expect(runtime.invoke(targetID: 33, signatureID: 34, arguments: [], receiver: nil) == nil)
+        HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            var result: UInt64 = 0xCAFE
+            #expect(!ir_hotfix_invoke(33, 34, nil, nil, 0, nil, &result))
+            #expect(result == 0xCAFE)
+        }
+    }
+
+    @Test func unsafeOperandPatchesFallBackWithoutChangingBridgeResult() throws {
+        let suiteName = "ir.hotfix.unsafe-operands.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patches = [
+            HotfixPatch(
+                id: "patch.unsafe-index",
+                targetID: 35,
+                signatureID: 36,
+                entryFunction: "patch",
+                ir: """
+                define i64 @patch() {
+                entry:
+                  %value = insertvalue %aggregate undef, i64 42, -1
+                  ret i64 0
+                }
+                """
+            ),
+            HotfixPatch(
+                id: "patch.unsafe-floating",
+                targetID: 37,
+                signatureID: 38,
+                entryFunction: "patch",
+                ir: """
+                define i64 @patch() {
+                entry:
+                  ret i64 nan
+                }
+                """
+            )
+        ]
+        for patch in patches {
+            manager.upsert(patch)
+            try manager.activatePatch(id: patch.id)
+        }
+        let runtime = HotfixRuntime(manager: manager)
+
+        #expect(runtime.invoke(targetID: 35, signatureID: 36, arguments: [], receiver: nil) == nil)
+        #expect(runtime.invoke(targetID: 37, signatureID: 38, arguments: [], receiver: nil) == nil)
+        HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            var indexResult: UInt64 = 0xCAFE
+            #expect(!ir_hotfix_invoke(35, 36, nil, nil, 0, nil, &indexResult))
+            #expect(indexResult == 0xCAFE)
+
+            var floatingResult: UInt64 = 0xBEEF
+            #expect(!ir_hotfix_invoke(37, 38, nil, nil, 0, nil, &floatingResult))
+            #expect(floatingResult == 0xBEEF)
+        }
     }
 
     @Test func recursionGuardRejectsOnlyActiveTarget() {
