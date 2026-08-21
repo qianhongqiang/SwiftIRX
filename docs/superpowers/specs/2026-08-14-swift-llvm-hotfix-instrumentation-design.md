@@ -194,6 +194,13 @@ For an instance patch, the interpreter receives `.pointer(0)` for `%self` and an
 
 `runMain` remains as a compatibility wrapper over the general API. Parser and runtime errors continue to use `LLVMIRInterpreterError` and include the target function name where relevant.
 
+Each `run` has one execution budget shared by its root and nested interpreted
+calls. The budget permits 200,000 basic-block visits and at most four active
+interpreted frames (the root plus three callees). `insertvalue` accepts only
+indices in `0..<1024`, limiting interpreter-created aggregates to 1,024
+elements. Duplicate block labels, unsafe aggregate indices, and nonfinite,
+fractional, or out-of-range integer spellings throw instead of continuing.
+
 ## Runtime State and Failure Handling
 
 The patch registry stores patches by patch ID and active patch ID by target ID.
@@ -209,15 +216,21 @@ Before execution, the runtime validates:
 - Supplied argument types match the entry function parameters.
 
 The bridge returns `false` for a missing patch, signature mismatch, parse error,
-runtime error, step-limit failure, argument mismatch, unsupported result, or a
-void-versus-scalar result mismatch. The native original implementation then runs
-synchronously. The current implementation does not cross-check an `i64` patch
-result with an `i1` target return kind or vice versa: the bridge encodes the
+runtime error, execution-budget failure, argument mismatch, unsupported result,
+or a void-versus-scalar result mismatch. The native original implementation then
+runs synchronously. The current implementation does not cross-check an `i64`
+patch result with an `i1` target return kind or vice versa: the bridge encodes the
 actual patch value, after which an `i1` trampoline truncates raw bits and an
 `i64` trampoline observes a boolean as zero or one. Patch authors must make the
 IR return kind agree with the return kind used to compute the canonical
 signature. Interpreter failures are currently suppressed with `try?`; the
 prototype does not expose a runtime diagnostic hook.
+
+Bridge validation covers metadata such as required argument/result pointer
+presence, argument count, kind values, and canonical boolean bits. It cannot
+validate that an arbitrary nonnull C pointer is mapped readable or writable
+memory; such addresses remain caller-trusted and an invalid external caller can
+crash the process before fallback.
 
 A thread-local set of active target IDs prevents a patch from recursively re-entering the same target. Nested patches for different target IDs remain allowed.
 

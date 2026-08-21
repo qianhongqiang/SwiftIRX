@@ -113,7 +113,7 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
 
 With the Swift Testing framework used here, XCTest-style method selectors can
 quietly select zero tests. Confirm a nonzero `totalTestCount` in the generated
-`.xcresult`; the target-level command above currently runs 43 unit tests.
+`.xcresult`; the target-level command above currently runs 55 unit tests.
 
 The full command is:
 
@@ -244,13 +244,20 @@ only when that bridge returns `true`; otherwise it calls the native clone with
 the untouched Swift ABI values.
 
 Fallback covers no active patch, a target/signature mismatch, malformed IR,
-missing entry function, entry parameter mismatch, interpreter error, step-limit
-failure, invalid bridge buffers, void-versus-scalar result mismatch, and
-unsupported result encoding. These conditions fail closed without crashing the
-target function. An `i64`/`i1` result mismatch is not in this list because it is
-not rejected today; it is encoded as described above. The current runtime uses
-`try?` for interpreter failures and does not expose a production
+missing entry function, entry parameter mismatch, interpreter error, execution
+budget failure, malformed bridge metadata, void-versus-scalar result mismatch,
+and unsupported result encoding. Malformed metadata includes a negative or
+greater-than-eight count, missing kind/bits arrays for a nonzero count, an
+unknown or void argument kind, noncanonical boolean bits, and a missing or
+unexpected result pointer. An `i64`/`i1` result mismatch is not in this list
+because it is not rejected today; it is encoded as described above. The current
+runtime uses `try?` for interpreter failures and does not expose a production
 diagnostic/reporting hook.
+
+The C entry point cannot prove that an arbitrary nonnull pointer names readable
+or writable mapped memory. It trusts such addresses after the nil/count/kind
+metadata checks. Pass-generated calls provide valid storage, but an erroneous
+external C caller can still cause a process crash rather than a native fallback.
 
 Direct recursive calls inside the native clone are rewritten to call the clone,
 so native recursion does not keep entering the trampoline. Patch recursion is
@@ -261,6 +268,27 @@ Patch registry reads and writes are serialized with `NSLock`. Each operation
 copies or publishes a complete value-state snapshot, and persistence uses
 `UserDefaults`; this is a teaching implementation, not a lock-free hot path or
 a transactional remote-patch store.
+
+## Interpreter execution bounds
+
+One `LLVMIRInterpreter.run` creates a single budget shared by the root entry and
+every interpreted function it calls:
+
+- At most 200,000 basic-block visits are allowed across the whole run. Entering
+  a block consumes one step; individual instructions do not each consume a
+  separate step. Loops and callees therefore draw from the same counter.
+- At most four interpreted function frames can be active at once: the root plus
+  no more than three callees. Recursion, mutual recursion, and even a finite
+  five-frame call chain fail with the call-depth error.
+- `insertvalue` indices are restricted to `0..<1024`, so interpreter-created
+  aggregates contain at most 1,024 elements. Negative, 1,024, and larger indices
+  fail before growing an aggregate.
+
+Duplicate basic-block labels, unsafe aggregate indices, and nonfinite,
+fractional, or out-of-range integer spellings throw parser/runtime errors. A
+patch invoked through `ir_hotfix_invoke` converts those errors and the execution
+budget errors into `false`, so the trampoline takes its native fallback. A
+direct call to `LLVMIRInterpreter.run` receives the corresponding error.
 
 ## Descriptor section
 
@@ -291,10 +319,11 @@ Loading and interpreting new executable logic can conflict with App Store
 Review rules, platform security expectations, organizational release controls,
 and incident-response requirements. This prototype has no patch authenticity
 signature, trust chain, entitlement model, rollout controls, audit log,
-revocation protocol, sandbox, or hardened resource limits beyond the
-interpreter's step bound. Persisted JSON in `UserDefaults` is not a secure
-distribution channel. Do not describe or deploy this repository as a
-production-ready over-the-air hotfix mechanism. A production design would need
-legal and App Review review, cryptographic signing and verification, strict
-authorization, replay prevention, monitoring, staged rollout, rollback, and a
-substantially stronger execution sandbox.
+revocation protocol, or hardened sandbox. The basic-block, call-frame, and
+aggregate limits above are narrow resource guards, not a complete sandbox: for
+example, there is no overall IR input-size, heap, or wall-clock budget. Persisted
+JSON in `UserDefaults` is not a secure distribution channel. Do not describe or
+deploy this repository as a production-ready over-the-air hotfix mechanism. A
+production design would need legal and App Review review, cryptographic signing
+and verification, strict authorization, replay prevention, monitoring, staged
+rollout, rollback, and a substantially stronger execution sandbox.
