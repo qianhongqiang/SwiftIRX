@@ -19,7 +19,8 @@ Supported function shapes:
 - Synchronous actor instance methods meeting the same manifest requirement.
 - Synchronous, non-generic functions.
 - `i64`, `i1`, and `void` LLVM ABI returns.
-- `i64` and `i1` LLVM ABI value arguments.
+- Up to eight `i64` and `i1` LLVM ABI value arguments; a verified receiver does
+  not count toward this limit.
 
 The initial implementation skips:
 
@@ -32,7 +33,11 @@ The initial implementation skips:
 - `async`, `throws`, `inout`, variadic, indirect-result, aggregate, floating-point, or closure ABI shapes.
 - Initializers and deinitializers unless their emitted ABI is proven safe in a later version.
 
-Every skipped definition must have an explicit reason available from the pass diagnostic output. Unsupported functions continue to compile and execute without a patch trampoline.
+Definitions that enter ABI classification and are rejected have an explicit
+reason in the pass diagnostic output. Declarations, non-Swift calling
+conventions, intrinsics, and generated hotfix symbols are non-candidates and do
+not emit skip diagnostics. Unsupported functions continue to compile and
+execute without a patch trampoline.
 
 ## Build Architecture
 
@@ -129,7 +134,7 @@ ir_hotfix_invoke(
 
 Arguments use parallel buffers:
 
-- `argumentKinds` describes each slot as integer, boolean, or object receiver.
+- `argumentKinds` describes each scalar slot as integer or boolean.
 - `argumentBits` contains fixed-width raw values.
 - `receiver` is null for top-level and static functions and contains the unretained class or actor receiver for instance methods.
 - `resultBits` is caller-provided storage for a scalar result. Void functions do not read it.
@@ -191,7 +196,10 @@ For an instance patch, the interpreter receives `.pointer(0)` for `%self` and an
 
 ## Runtime State and Failure Handling
 
-The patch registry stores patches by patch ID and active patch ID by target ID. Reads use a thread-safe immutable snapshot so the hot path does not hold a lock while interpreting a patch. Updates publish a new snapshot after persistence succeeds.
+The patch registry stores patches by patch ID and active patch ID by target ID.
+Reads and updates take an `NSLock`, copy a complete value-state snapshot, and
+release the lock before interpreting a patch. Updates publish the new in-memory
+snapshot after encoding and writing it to `UserDefaults`.
 
 Before execution, the runtime validates:
 
@@ -200,11 +208,12 @@ Before execution, the runtime validates:
 - The declared entry function exists.
 - Argument and return types match the entry function.
 
-The bridge returns `false` for a missing patch, signature mismatch, parse error, runtime error, step-limit failure, or result mismatch. The native original implementation then runs synchronously. Failures are recorded through a diagnostic hook without crashing the target function.
+The bridge returns `false` for a missing patch, signature mismatch, parse error, runtime error, step-limit failure, or result mismatch. The native original implementation then runs synchronously. Interpreter failures are currently suppressed with `try?`; the prototype does not expose a runtime diagnostic hook.
 
 A thread-local set of active target IDs prevents a patch from recursively re-entering the same target. Nested patches for different target IDs remain allowed.
 
-At startup, descriptor discovery checks for duplicate target IDs with different mangled symbols. Conflicting targets are disabled and reported instead of allowing a patch to select an ambiguous function.
+The current runtime does not scan descriptors at startup or detect duplicate
+target IDs. The trampoline embeds both IDs and invokes the registry directly.
 
 ## Function Metadata
 
@@ -217,7 +226,10 @@ The pass emits one fixed-layout descriptor per eligible function into a Mach-O `
 - Argument count and argument-kind sequence.
 - Receiver-presence flag.
 
-A companion inspection command can extract these records from a linked binary and export JSON. Runtime patch lookup does not depend on this export because the trampoline embeds both IDs directly.
+The test suite inspects these records with Homebrew `llvm-objdump` and LLVM IR
+checks. The repository does not currently ship a descriptor-to-JSON exporter.
+Runtime patch lookup does not depend on descriptor extraction because the
+trampoline embeds both IDs directly.
 
 ## Project Organization
 
