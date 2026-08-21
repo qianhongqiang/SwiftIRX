@@ -8,6 +8,7 @@ PLUGIN="${IR_HOTFIX_PLUGIN_PATH:-$ROOT/Tools/HotfixPass/.build/libHotfixPass.dyl
 FIXTURES="$ROOT/Tools/HotfixPass/Tests/fixtures"
 LLVM_ROOT="/opt/homebrew/opt/llvm@19/bin"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
+TARGET="$(uname -m)-apple-macosx$(sw_vers -productVersion | awk -F. '{ print $1 ".0" }')"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-wrapper.XXXXXX")"
 
 cleanup() {
@@ -53,6 +54,61 @@ grep -Fq '_ir_hotfix_invoke' "$TEMP/scalar-symbols.txt"
 "$LLVM_ROOT/llvm-objdump" --macho --section-headers \
   "$TEMP/wrapper_scalar.o" >"$TEMP/scalar-sections.txt"
 grep -Fq '__hotfix' "$TEMP/scalar-sections.txt"
+
+mkdir -p "$TEMP/fixture directory" "$TEMP/responses"
+cp "$FIXTURES/wrapper_scalar.swift" \
+  "$TEMP/fixture directory/wrapper scalar.swift"
+printf '%s\n' \
+  '-c' \
+  '-parse-as-library' \
+  '-primary-file' \
+  '"fixture directory/wrapper scalar.swift"' \
+  '-module-name' \
+  'HotfixFrontendResponseFixture' \
+  '-target' \
+  "$TARGET" \
+  '-sdk' \
+  "\"$SDK\"" \
+  '-o' \
+  '"response object.o"' \
+  >"$TEMP/responses/compile args.rsp"
+printf '%s\n' '@"responses/compile args.rsp"' \
+  >"$TEMP/responses/frontend.rsp"
+(
+  cd "$TEMP"
+  IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
+    -frontend @responses/frontend.rsp
+)
+"$LLVM_ROOT/llvm-nm" "$TEMP/response object.o" \
+  >"$TEMP/response-symbols.txt"
+grep -Fq '.hotfix_original' "$TEMP/response-symbols.txt"
+grep -Fq '_ir_hotfix_invoke' "$TEMP/response-symbols.txt"
+"$LLVM_ROOT/llvm-objdump" --macho --section-headers \
+  "$TEMP/response object.o" >"$TEMP/response-sections.txt"
+grep -Fq '__hotfix' "$TEMP/response-sections.txt"
+
+printf '%s\n' '@"responses/cycle-b.rsp"' >"$TEMP/responses/cycle-a.rsp"
+printf '%s\n' '@"responses/cycle-a.rsp"' >"$TEMP/responses/cycle-b.rsp"
+if (
+  cd "$TEMP"
+  IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
+    -frontend @responses/cycle-a.rsp 2>cycle.stderr
+); then
+  echo "error: response file cycle unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq '[HotfixWrapper] error: response file cycle:' "$TEMP/cycle.stderr"
+
+if (
+  cd "$TEMP"
+  IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
+    -frontend @responses/missing.rsp 2>missing.stderr
+); then
+  echo "error: unreadable response file unexpectedly succeeded" >&2
+  exit 1
+fi
+grep -Fq '[HotfixWrapper] error: response file is not readable:' \
+  "$TEMP/missing.stderr"
 
 IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
   -Onone \

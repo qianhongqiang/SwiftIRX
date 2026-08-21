@@ -54,8 +54,121 @@ fi
 
 [[ -x "$REAL_FRONTEND" ]] || fail "real Apple swift-frontend is not executable: $REAL_FRONTEND"
 
-if ! contains_argument -c "$@" && ! contains_argument -emit-object "$@"; then
-  exec "$REAL_FRONTEND" "$@"
+response_arguments=()
+response_stack_keys=()
+response_stack_paths=()
+
+tokenize_response_file() {
+  local path="$1"
+  local LC_ALL=C
+  local content=""
+  local token=""
+  local character
+  local quote
+  local index=0
+  local length
+
+  IFS= read -r -d '' content <"$path" || true
+  length=${#content}
+  response_tokens=()
+
+  while ((index < length)); do
+    if [[ -z "$token" ]]; then
+      while ((index < length)); do
+        character="${content:index:1}"
+        case "$character" in
+          ' ' | $'\t' | $'\r' | $'\n') ((++index)) ;;
+          *) break ;;
+        esac
+      done
+      ((index < length)) || break
+    fi
+
+    character="${content:index:1}"
+    if [[ "$character" == '\' ]] && ((index + 1 < length)); then
+      ((index += 2))
+      token+="${content:index-1:1}"
+      continue
+    fi
+
+    if [[ "$character" == '"' || "$character" == "'" ]]; then
+      quote="$character"
+      ((++index))
+      while ((index < length)) && [[ "${content:index:1}" != "$quote" ]]; do
+        if [[ "${content:index:1}" == '\' ]] && ((index + 1 < length)); then
+          ((++index))
+        fi
+        token+="${content:index:1}"
+        ((++index))
+      done
+      if ((index == length)); then
+        break
+      fi
+      ((++index))
+      continue
+    fi
+
+    case "$character" in
+      ' ' | $'\t' | $'\r' | $'\n')
+        [[ -z "$token" ]] || response_tokens+=("$token")
+        token=""
+        ((++index))
+        ;;
+      *)
+        token+="$character"
+        ((++index))
+        ;;
+    esac
+  done
+
+  [[ -z "$token" ]] || response_tokens+=("$token")
+}
+
+expand_frontend_argument() {
+  local argument="$1"
+  if [[ "$argument" != @* ]]; then
+    response_arguments+=("$argument")
+    return
+  fi
+
+  # Swift's LLVM response expansion resolves every relative @path from cwd.
+  local response_path="${argument#@}"
+  if [[ "$response_path" != /* ]]; then
+    response_path="$PWD/$response_path"
+  fi
+  [[ -f "$response_path" && -r "$response_path" ]] ||
+    fail "response file is not readable: $response_path"
+
+  local response_key
+  response_key="$(stat -f '%d:%i' "$response_path")" ||
+    fail "cannot inspect response file: $response_path"
+  local stack_index
+  for ((stack_index = 0; stack_index < ${#response_stack_keys[@]}; ++stack_index)); do
+    if [[ "${response_stack_keys[stack_index]}" == "$response_key" ]]; then
+      fail "response file cycle: ${response_stack_paths[stack_index]} -> $response_path"
+    fi
+  done
+
+  response_stack_keys+=("$response_key")
+  response_stack_paths+=("$response_path")
+  tokenize_response_file "$response_path"
+  local tokens=("${response_tokens[@]}")
+  local token
+  for token in "${tokens[@]}"; do
+    expand_frontend_argument "$token"
+  done
+  unset 'response_stack_keys[${#response_stack_keys[@]}-1]'
+  unset 'response_stack_paths[${#response_stack_paths[@]}-1]'
+}
+
+for frontend_argument in "$@"; do
+  expand_frontend_argument "$frontend_argument"
+done
+arguments=("${response_arguments[@]}")
+
+if ! contains_argument -c "${arguments[@]}" &&
+  ! contains_argument -emit-object "${arguments[@]}"; then
+  exec "$REAL_FRONTEND" "${arguments[@]}"
 fi
 
 primary_file=""
@@ -63,7 +176,6 @@ primary_filelist=""
 output_file=""
 output_filelist=""
 swift_inputs=()
-arguments=("$@")
 
 for ((index = 0; index < ${#arguments[@]}; ++index)); do
   argument="${arguments[index]}"
@@ -127,7 +239,7 @@ fi
 case "$(basename "$primary_file")" in
   Hotfix.swift | LLVMIRInterpreter.swift)
     diagnose "forwarding excluded source: $primary_file"
-    exec "$REAL_FRONTEND" "$@"
+    exec "$REAL_FRONTEND" "${arguments[@]}"
     ;;
 esac
 

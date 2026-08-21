@@ -939,6 +939,13 @@ The host target and sanitized deployment environment are required because an
 iOS app build phase otherwise stamps the loadable plugin as iOS even when CMake
 uses the macOS SDK.
 
+Declare the pass source, CMake file, manifest generator, and wrapper as phase
+inputs. Hash those four files into an atomically updated derived header and
+declare that header as a second output. Configure it as the Debug-only Swift
+bridging header so a changed instrumentation input invalidates every app Swift
+object, while an identical fingerprint preserves the header timestamp and
+keeps an incremental build idle.
+
 - [ ] **Step 4: Route Debug compilation through the wrapper**
 
 Set the app target Debug configuration to the wrapper implemented for the file-boundary pipeline:
@@ -947,6 +954,7 @@ Set the app target Debug configuration to the wrapper implemented for the file-b
 SWIFT_EXEC = $(SRCROOT)/Tools/HotfixPass/swiftc-hotfix
 SWIFT_ENABLE_BATCH_MODE = NO
 SWIFT_USE_INTEGRATED_DRIVER = NO
+SWIFT_OBJC_BRIDGING_HEADER = $(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixInstrumentationStamp.h
 ```
 
 Leave Release unchanged. The wrapper emits Apple Swift bitcode, runs
@@ -961,6 +969,12 @@ basename, so Debug uses the external driver; that driver re-enters the wrapper
 as its frontend with one primary source per object job. The wrapper forwards
 `Hotfix.swift` and `LLVMIRInterpreter.swift` unchanged by primary-source
 basename.
+
+Frontend response files are expanded before job classification and rewriting
+using LLVM's GNU quoting and backslash rules, without `eval`. Expansion is
+recursive, detects file-identity cycles, and fails clearly for unreadable
+files. Matching Swift frontend behavior, relative top-level and nested
+`@response` paths resolve from the wrapper process's current working directory.
 
 The external LLVM boundary also requires two Debug compatibility adjustments.
 Apple debug metadata is not readable by Homebrew LLVM 19.1.7, so transformed
