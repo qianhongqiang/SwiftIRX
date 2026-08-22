@@ -2,5 +2,6 @@ DerivedData/
 Tools/HotfixPass/.build/
 Tools/HotfixPass/.cmake-build/
 Tools/HotfixPass/.toolchain/
+Tools/HotfixMacros/.build/
 *.bc
 *.ll.tmp

@@ -4,6 +4,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BUILDER="$ROOT/Tools/HotfixPass/swift-patch-build"
+PATCH_TOOL="$ROOT/Tools/HotfixPass/.build/HotfixPatchTool"
+MACRO_PACKAGE="$ROOT/Tools/HotfixMacros"
+ANNOTATION="$ROOT/SDK/IRHotfixSDK/Runtime/HotfixPatchAnnotation.swift"
+SWIFT="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+SWIFTC="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
 MANIFEST="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest.json"
 FIXTURES="$ROOT/Tools/HotfixPass/Tests/fixtures"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-patch-build-tests.XXXXXX")"
@@ -72,5 +77,53 @@ if "$BUILDER" \
   exit 1
 fi
 grep -Fq 'inline the helper before building the patch' "$TEMP/helper.stderr"
+
+"$SWIFT" build \
+  --package-path "$MACRO_PACKAGE" \
+  --scratch-path "$TEMP/MacroBuild" \
+  --configuration release \
+  --product IRHotfixMacrosPlugin
+macro_bin_directory="$(
+  "$SWIFT" build \
+    --package-path "$MACRO_PACKAGE" \
+    --scratch-path "$TEMP/MacroBuild" \
+    --configuration release \
+    --show-bin-path
+)"
+macro_plugin="$macro_bin_directory/IRHotfixMacrosPlugin-tool"
+test -x "$macro_plugin"
+test -x "$PATCH_TOOL"
+
+sdk_path="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+"$SWIFTC" \
+  -emit-bc \
+  -parse-as-library \
+  -whole-module-optimization \
+  -Onone \
+  -gnone \
+  -D IR_HOTFIX_PATCH_BUILD \
+  -load-plugin-executable "$macro_plugin#IRHotfixMacrosPlugin" \
+  -module-name IRPatchAnnotationTests \
+  -sdk "$sdk_path" \
+  -target arm64-apple-ios26.2-simulator \
+  -module-cache-path "$TEMP/ModuleCache" \
+  "$ANNOTATION" \
+  "$FIXTURES/annotated_patch.swift" \
+  -o "$TEMP/annotated.bc"
+
+mkdir "$TEMP/annotated-output"
+"$PATCH_TOOL" extract-annotated \
+  "$MANIFEST" \
+  "$TEMP/annotated.bc" \
+  "$TEMP/annotated-output"
+annotated_patch="$TEMP/annotated-output/0x37465577a37332e8.irpatch"
+test -f "$annotated_patch"
+grep -Fq 'define dso_local swiftcc i64 @integerTarget(i64' "$annotated_patch"
+grep -Fq 'add i64' "$annotated_patch"
+grep -Fq ', 23' "$annotated_patch"
+if grep -Fq '__ir_hotfix_patch_anchor_' "$annotated_patch"; then
+  echo "error: generated Patch contains the macro anchor" >&2
+  exit 1
+fi
 
 echo "[HotfixPatchTests] all checks passed"

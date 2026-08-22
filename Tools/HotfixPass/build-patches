@@ -1,0 +1,124 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MACRO_PACKAGE="$ROOT/Tools/HotfixMacros"
+SWIFT="${IR_HOTFIX_SWIFT:-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift}"
+XCODEBUILD="${IR_HOTFIX_XCODEBUILD:-/usr/bin/xcodebuild}"
+
+fail() {
+  echo "[HotfixPatchBuild] error: $*" >&2
+  exit 1
+}
+
+usage() {
+  echo "usage: build-patches --project <App.xcodeproj> --scheme <scheme> --baseline-manifest <HotfixTargetManifest.json> --output <directory> [--configuration Debug] [--destination <xcode destination>]" >&2
+  exit 64
+}
+
+project=""
+scheme=""
+baseline_manifest=""
+output_directory=""
+configuration="Debug"
+destination="generic/platform=iOS Simulator"
+
+while (($# > 0)); do
+  case "$1" in
+    --project | --scheme | --baseline-manifest | --output | --configuration | --destination)
+      (($# >= 2)) || usage
+      option="$1"
+      value="$2"
+      shift 2
+      case "$option" in
+        --project) project="$value" ;;
+        --scheme) scheme="$value" ;;
+        --baseline-manifest) baseline_manifest="$value" ;;
+        --output) output_directory="$value" ;;
+        --configuration) configuration="$value" ;;
+        --destination) destination="$value" ;;
+      esac
+      ;;
+    -h | --help) usage ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$project" && -n "$scheme" && -n "$baseline_manifest" && -n "$output_directory" ]] || usage
+[[ -d "$project" ]] || fail "Xcode project does not exist: $project"
+[[ -r "$baseline_manifest" && -f "$baseline_manifest" ]] ||
+  fail "baseline Manifest is not readable: $baseline_manifest"
+[[ -x "$SWIFT" ]] || fail "Swift executable is missing: $SWIFT"
+[[ -x "$XCODEBUILD" ]] || fail "xcodebuild is missing: $XCODEBUILD"
+
+baseline_manifest="$(cd "$(dirname "$baseline_manifest")" && pwd)/$(basename "$baseline_manifest")"
+if [[ -e "$output_directory" ]]; then
+  [[ -d "$output_directory" ]] || fail "output path is not a directory: $output_directory"
+  if find "$output_directory" -mindepth 1 -print -quit | grep -q .; then
+    fail "output directory must be empty: $output_directory"
+  fi
+else
+  mkdir -p "$output_directory"
+fi
+output_directory="$(cd "$output_directory" && pwd)"
+
+temp="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-patch-branch.XXXXXX")"
+cleanup() {
+  find "$temp" -type f -delete
+  find "$temp" -depth -type d -empty -delete
+}
+trap cleanup EXIT
+
+"$SWIFT" build \
+  --package-path "$MACRO_PACKAGE" \
+  --scratch-path "$temp/MacroBuild" \
+  --configuration release \
+  --product IRHotfixMacrosPlugin
+macro_bin_directory="$(
+  "$SWIFT" build \
+    --package-path "$MACRO_PACKAGE" \
+    --scratch-path "$temp/MacroBuild" \
+    --configuration release \
+    --show-bin-path
+)"
+macro_plugin="$macro_bin_directory/IRHotfixMacrosPlugin-tool"
+[[ -x "$macro_plugin" ]] || fail "macro plugin was not built: $macro_plugin"
+
+IR_HOTFIX_PATCH_MODE=1 \
+IR_HOTFIX_BASELINE_MANIFEST="$baseline_manifest" \
+IR_HOTFIX_MACRO_PLUGIN="$macro_plugin" \
+"$XCODEBUILD" build \
+  -project "$project" \
+  -scheme "$scheme" \
+  -configuration "$configuration" \
+  -destination "$destination" \
+  -derivedDataPath "$temp/DerivedData" \
+  ARCHS=arm64 \
+  ONLY_ACTIVE_ARCH=YES \
+  IR_HOTFIX_PATCH_MODE=1 \
+  IR_HOTFIX_BASELINE_MANIFEST="$baseline_manifest" \
+  IR_HOTFIX_MACRO_PLUGIN="$macro_plugin"
+
+patch_count=0
+while IFS= read -r -d '' patch; do
+  destination_path="$output_directory/$(basename "$patch")"
+  if [[ -e "$destination_path" ]]; then
+    cmp -s "$patch" "$destination_path" ||
+      fail "different annotated functions produced the same Patch ID: $(basename "$patch")"
+    continue
+  fi
+  temporary_path="$(mktemp "$output_directory/.$(basename "$patch").XXXXXX")"
+  cp "$patch" "$temporary_path"
+  chmod 0644 "$temporary_path"
+  mv -f "$temporary_path" "$destination_path"
+  ((patch_count += 1))
+done < <(
+  find "$temp/DerivedData" \
+    -type f \
+    -path '*.hotfix-patches/*.irpatch' \
+    -print0
+)
+
+((patch_count > 0)) || fail "build contained no @HotfixPatch functions"
+echo "[HotfixPatchBuild] wrote $patch_count Patch artifact(s) to $output_directory"

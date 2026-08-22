@@ -13,6 +13,7 @@ IRHotfixSDK/
 │   └── IRHotfixABI.h
 ├── Runtime/
 │   ├── Hotfix.swift
+│   ├── HotfixPatchAnnotation.swift
 │   └── LLVMIRInterpreter.swift
 ├── Bridge/
 │   ├── IRHotfixObjCBridge.h
@@ -29,6 +30,8 @@ IRHotfixSDK/
 - `Runtime/Hotfix.swift` contains the patch registry, execution entry points,
   fallback behavior, the `hf_vm_invoke(HFPatchFrame *)` implementation, and
   the Codable Target Manifest model.
+- `Runtime/HotfixPatchAnnotation.swift` declares the build-only
+  `@HotfixPatch` marker used to select changed functions on a patch branch.
 - `Runtime/LLVMIRInterpreter.swift` parses and executes the supported LLVM IR
   subset and owns structured host handles for objects, selectors, and classes.
 - `Bridge/IRHotfixObjCBridge.h` exposes a stable C ABI to Swift and future VM
@@ -101,11 +104,48 @@ SDK derives all other metadata:
 Supported patch ABI types are `i64`, `i1`, and `void`; a leading `ptr` is the
 optional receiver. The demo payloads under `IR/Patches` are complete examples.
 
-Application authors can generate that text from Swift instead of writing LLVM
-IR. Define exactly one top-level `func hotfixPatch(...)`, then run the host-side
-`Tools/HotfixPass/swift-patch-build` command with the built app's
-`HotfixTargetManifest.json`, a unique target query, the Swift source, and the
-output `.irpatch` path. The compiler selects the real mangled target from the
-Manifest and validates its receiver, scalar arguments, and return ABI before
-publishing the single-function Patch. `IR/PatchSources/HotfixSetupUI.swift` is
-the end-to-end UIKit example.
+## Build a patch from a release branch
+
+The primary authoring workflow changes the original source in place. Start a
+patch branch from the exact released revision, edit the affected function, and
+attach `@HotfixPatch` to that function:
+
+```swift
+@HotfixPatch
+private func setupUI() {
+    let view = UIView(frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+    view.backgroundColor = .yellow
+    self.view.addSubview(view)
+}
+```
+
+Keep the released app's `HotfixTargetManifest.json` as the immutable baseline,
+then run from the repository root:
+
+```bash
+Tools/HotfixPass/build-patches \
+  --project IR.xcodeproj \
+  --scheme IR \
+  --baseline-manifest Released/HotfixTargetManifest.json \
+  --output PatchProducts
+```
+
+The command invokes the real Xcode build so module names, imports, compilation
+conditions, bridging headers, and SDK settings match the application. During
+that build the macro emits a private anchor for each annotation. The compiler
+wrapper resolves the anchor to the modified function's exact mangled symbol,
+requires that symbol and ABI to exist in the baseline Manifest, and writes one
+`0x<targetID>.irpatch` file per selected function. A renamed function, a newly
+added function, or an ABI-changing edit fails instead of silently producing an
+unusable Patch.
+
+`@HotfixPatch` is intentionally available only while `build-patches` sets
+`IR_HOTFIX_PATCH_BUILD`. The first version accepts non-generic, synchronous,
+non-throwing top-level functions and class instance methods whose lowered ABI
+is already supported by the published target descriptor. Static/class methods,
+mutating value-type methods, and functions that require local Swift helper
+definitions are rejected.
+
+`Tools/HotfixPass/swift-patch-build` remains as a low-level compatibility tool.
+It compiles a separate top-level `func hotfixPatch(...)`; application patch
+branches should use the annotation workflow above.

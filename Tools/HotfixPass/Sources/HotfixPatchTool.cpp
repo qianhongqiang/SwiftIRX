@@ -11,8 +11,10 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -20,6 +22,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -140,7 +143,8 @@ bool loadTarget(StringRef manifestPath, StringRef query, Target &selected,
     return false;
   }
 
-  std::vector<Target> matches;
+  std::vector<Target> exactMatches;
+  std::vector<Target> partialMatches;
   for (const json::Value &value : *targets) {
     const json::Object *object = value.getAsObject();
     if (object == nullptr) {
@@ -150,14 +154,17 @@ bool loadTarget(StringRef manifestPath, StringRef query, Target &selected,
     Target candidate;
     if (!parseTarget(*object, candidate, error))
       return false;
-    if (candidate.symbol == query ||
-        candidate.symbol.find(query.str()) != std::string::npos ||
-        (object->getString("targetID") &&
-         *object->getString("targetID") == query)) {
-      matches.push_back(std::move(candidate));
-    }
+    const bool exact =
+        candidate.symbol == query || (object->getString("targetID") &&
+                                      *object->getString("targetID") == query);
+    if (exact)
+      exactMatches.push_back(std::move(candidate));
+    else if (candidate.symbol.find(query.str()) != std::string::npos)
+      partialMatches.push_back(std::move(candidate));
   }
 
+  std::vector<Target> &matches =
+      exactMatches.empty() ? partialMatches : exactMatches;
   if (matches.empty()) {
     error = "no manifest target matches '" + query.str() + "'";
     return false;
@@ -308,6 +315,39 @@ bool lowerCheckedIntegerArithmetic(Function &entry, std::string &error) {
   return true;
 }
 
+void nameAnonymousBlocks(Function &entry) {
+  unsigned blockIndex = 0;
+  for (BasicBlock &block : entry) {
+    if (!block.hasName()) {
+      block.setName(blockIndex == 0
+                        ? "entry"
+                        : "hotfix.bb." + std::to_string(blockIndex));
+    }
+    ++blockIndex;
+  }
+}
+
+bool writePatch(Function &entry, StringRef outputPath, std::string &error) {
+  entry.setLinkage(GlobalValue::ExternalLinkage);
+  entry.setVisibility(GlobalValue::DefaultVisibility);
+  nameAnonymousBlocks(entry);
+
+  std::error_code fileError;
+  raw_fd_ostream output(outputPath, fileError);
+  if (fileError) {
+    error = "cannot open patch output '" + outputPath.str() +
+            "': " + fileError.message();
+    return false;
+  }
+  entry.print(output);
+  output.flush();
+  if (output.has_error()) {
+    error = "cannot write patch output '" + outputPath.str() + "'";
+    return false;
+  }
+  return true;
+}
+
 bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
                 StringRef outputPath, std::string &error) {
   Target target;
@@ -344,30 +384,83 @@ bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
   }
 
   entry->setName(target.symbol);
-  entry->setLinkage(GlobalValue::ExternalLinkage);
-  entry->setVisibility(GlobalValue::DefaultVisibility);
-  unsigned blockIndex = 0;
-  for (BasicBlock &block : *entry) {
-    if (!block.hasName()) {
-      block.setName(blockIndex == 0
-                        ? "entry"
-                        : "hotfix.bb." + std::to_string(blockIndex));
-    }
-    ++blockIndex;
+  return writePatch(*entry, outputPath, error);
+}
+
+bool extractAnnotatedPatches(StringRef manifestPath, StringRef inputPath,
+                             StringRef outputDirectory, std::string &error) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  std::unique_ptr<Module> module = parseIRFile(inputPath, diagnostic, context);
+  if (module == nullptr) {
+    std::string message;
+    raw_string_ostream stream(message);
+    diagnostic.print("HotfixPatchTool", stream);
+    stream.flush();
+    error =
+        "cannot read Swift LLVM module '" + inputPath.str() + "': " + message;
+    return false;
   }
 
-  std::error_code fileError;
-  raw_fd_ostream output(outputPath, fileError);
-  if (fileError) {
-    error = "cannot open patch output '" + outputPath.str() +
-            "': " + fileError.message();
+  std::vector<Function *> anchors;
+  for (Function &function : *module) {
+    if (!function.isDeclaration() &&
+        function.getName().contains("__ir_hotfix_patch_anchor_")) {
+      anchors.push_back(&function);
+    }
+  }
+
+  std::error_code directoryError = sys::fs::create_directories(outputDirectory);
+  if (directoryError) {
+    error = "cannot create patch output directory '" + outputDirectory.str() +
+            "': " + directoryError.message();
     return false;
   }
-  entry->print(output);
-  output.flush();
-  if (output.has_error()) {
-    error = "cannot write patch output '" + outputPath.str() + "'";
-    return false;
+
+  std::set<uint64_t> extractedTargetIDs;
+  for (Function *anchor : anchors) {
+    std::set<Function *> callees;
+    for (BasicBlock &block : *anchor) {
+      for (Instruction &instruction : block) {
+        const auto *call = dyn_cast<CallBase>(&instruction);
+        Function *callee =
+            call == nullptr ? nullptr : call->getCalledFunction();
+        if (callee != nullptr && callee != anchor && !callee->isDeclaration() &&
+            !callee->getName().contains("__ir_hotfix_patch_anchor_")) {
+          callees.insert(callee);
+        }
+      }
+    }
+    if (callees.size() != 1) {
+      error = "annotation anchor '" + anchor->getName().str() +
+              "' must call exactly one defined target function";
+      return false;
+    }
+
+    Function *targetFunction = *callees.begin();
+    Target target;
+    if (!loadTarget(manifestPath, targetFunction->getName(), target, error))
+      return false;
+    if (target.symbol != targetFunction->getName()) {
+      error = "annotated function '" + targetFunction->getName().str() +
+              "' is not an exact baseline Manifest target";
+      return false;
+    }
+    if (!extractedTargetIDs.insert(target.targetID).second) {
+      error = "multiple @HotfixPatch annotations resolve to target '" +
+              target.symbol + "'";
+      return false;
+    }
+    if (!validateEntry(*targetFunction, target, error) ||
+        !lowerCheckedIntegerArithmetic(*targetFunction, error)) {
+      return false;
+    }
+
+    SmallString<256> outputPath(outputDirectory);
+    sys::path::append(outputPath,
+                      "0x" + utohexstr(target.targetID, true, 16) + ".irpatch");
+    if (!writePatch(*targetFunction, outputPath, error))
+      return false;
   }
   return true;
 }
@@ -379,13 +472,22 @@ int fail(StringRef message) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 6 || StringRef(argv[1]) != "build") {
-    return fail("usage: HotfixPatchTool build <manifest.json> <target-query> "
-                "<swift.bc|swift.ll> <output.irpatch>");
+  if (argc == 6 && StringRef(argv[1]) == "build") {
+    std::string error;
+    if (!buildPatch(argv[2], argv[3], argv[4], argv[5], error))
+      return fail(error);
+    return 0;
   }
-
-  std::string error;
-  if (!buildPatch(argv[2], argv[3], argv[4], argv[5], error))
-    return fail(error);
-  return 0;
+  if (argc == 5 && StringRef(argv[1]) == "extract-annotated") {
+    std::string error;
+    if (!extractAnnotatedPatches(argv[2], argv[3], argv[4], error))
+      return fail(error);
+    return 0;
+  }
+  {
+    return fail("usage: HotfixPatchTool build <manifest.json> <target-query> "
+                "<swift.bc|swift.ll> <output.irpatch>\n"
+                "       HotfixPatchTool extract-annotated <manifest.json> "
+                "<swift.bc|swift.ll> <output-directory>");
+  }
 }

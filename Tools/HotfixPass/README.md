@@ -23,6 +23,12 @@ Swift patch source + app Target Manifest
   -> Apple Swift 6.2.4 swiftc -emit-bc
   -> HotfixPatchTool ABI validation and single-function extraction
   -> .irpatch text artifact
+
+Released source branch + edited @HotfixPatch function + released Target Manifest
+  -> Xcode build with the application's original compiler settings
+  -> IRHotfixMacrosPlugin annotation anchors
+  -> HotfixPatchTool exact-symbol/ABI validation and function extraction
+  -> one 0x<targetID>.irpatch per annotated function
 ```
 
 Do not pass `libHotfixPass.dylib` to Apple `swift-frontend` with
@@ -88,6 +94,38 @@ exclusion. `verify-patch-build.sh` compiles Swift patch sources and checks targe
 selection, receiver and scalar ABI validation, ambiguous queries, local helper
 rejection, and single-function output.
 
+## Patch-branch extraction
+
+Build the release normally and archive its bundled
+`HotfixTargetManifest.json`. To prepare a later fix, branch from that released
+revision, modify the original function body, add `@HotfixPatch`, and run:
+
+```bash
+Tools/HotfixPass/build-patches \
+  --project IR.xcodeproj \
+  --scheme IR \
+  --baseline-manifest Released/HotfixTargetManifest.json \
+  --output PatchProducts
+```
+
+`build-patches` builds the pinned SwiftSyntax macro executable, enables the
+annotation only for this build, and compiles one arm64 slice using Xcode. The
+wrapper removes coverage instrumentation from extracted IR, while leaving the
+application's other frontend settings intact. Patch mode skips generation of a
+new Target Manifest because compatibility is always checked against the
+released baseline.
+
+The generated macro peer calls the annotated original function solely to make
+the compiler-emitted relationship explicit. `HotfixPatchTool
+extract-annotated` follows that anchor, selects the real modified definition,
+requires an exact baseline symbol match, validates the published descriptor,
+and outputs only that definition. It does not infer a target from source names
+or select a near match.
+
+The older `swift-patch-build` command remains useful for low-level extractor
+fixtures that define a separate `func hotfixPatch(...)`; it is not the primary
+application authoring workflow.
+
 ## Xcode integration
 
 The `IR` target has two intentionally different compilation paths:
@@ -102,7 +140,7 @@ identifies the primary source and output. Quoting, nested files, paths containin
 spaces, missing files, and cycles are covered by the wrapper test. Relative
 response paths are resolved from the frontend process's working directory.
 
-The Debug build phase hashes `CMakeLists.txt`, both C++ tool sources, the public
+The Debug build phase hashes `CMakeLists.txt`, the pass and host-tool sources, the public
 `SDK/IRHotfixSDK/ABI` headers, the receiver manifest generator, and the wrapper
 into `HotfixInstrumentationStamp.h`. A changed tool fingerprint changes this
 bridging-header input and invalidates all app Swift objects. When the hash is
