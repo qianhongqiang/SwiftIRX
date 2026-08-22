@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "abiVersion": 1,
+  "abiVersion": 2,
   "targets": [
     {
       "symbol": "$s2IR14ViewControllerC7setupUI33_7B2304FAFD7CFEBD5E611A21DD4D9FE6LLyyF",

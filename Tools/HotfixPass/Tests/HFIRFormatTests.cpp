@@ -1,4 +1,5 @@
 #include "HFPatchContainer.h"
+#include "HFPatchFrame.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -27,7 +28,7 @@ hfir::Package makePackage() {
   using hfir::ValueType;
 
   hfir::Package package;
-  package.abiVersion = 1;
+  package.abiVersion = HF_ABI_VERSION;
   package.patchID = "test.add-ten";
   package.target = {0x0102030405060708ULL, 0x8877665544332211ULL, 0};
   package.constants = {{ConstantKind::I64, 10, {}}};
@@ -59,7 +60,7 @@ hfir::Package makePackage() {
 hfir::Package makePhiPackage(bool invalidPredecessor) {
   using namespace hfir;
   Package package;
-  package.abiVersion = 1;
+  package.abiVersion = HF_ABI_VERSION;
   package.patchID = "test.phi";
   package.target = {3, 4, 0};
   package.constants = {{ConstantKind::I64, 10, {}},
@@ -147,6 +148,19 @@ int main() {
   require(!hfir::verify(makePhiPackage(true), error) &&
               error.find("not a CFG predecessor") != std::string::npos,
           "phi accepted an incoming non-predecessor block");
+
+  hfir::Package oversizedHostCall = makePackage();
+  oversizedHostCall.imports = {{
+      1, hfir::HostImportKind::NativeC, "", "tooManyArguments", "",
+      hfir::ValueType::Void,
+      std::vector<hfir::ValueType>(hfir::kMaximumHostArgumentCount + 1,
+                                   hfir::ValueType::I64),
+      false,
+  }};
+  require(!hfir::verify(oversizedHostCall, error) &&
+              error.find("exceeds maximum host argument count") !=
+                  std::string::npos,
+          "oversized host import was accepted");
 
   std::vector<std::uint8_t> corrupted = first;
   corrupted[80] ^= 0x01;

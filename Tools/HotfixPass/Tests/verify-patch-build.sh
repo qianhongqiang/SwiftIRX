@@ -60,6 +60,42 @@ if grep -Eq '(^|[^[:alpha:]])(define|declare|llvm\.)|\$s[0-9]' "$TEMP/integer.hf
 fi
 
 "$BUILDER" \
+  --manifest "$MANIFEST" \
+  --target integerTarget \
+  --source "$FIXTURES/patch_native_swift_call.swift" \
+  --output "$TEMP/native-swift.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/native-swift.hfpatch" >"$TEMP/native-swift.hfir.txt"
+grep -Fq 'native-swift Swift.$s21ReleasedHostFunctions12doubleValueyS2iF' \
+  "$TEMP/native-swift.hfir.txt"
+grep -Fq 'host.call' "$TEMP/native-swift.hfir.txt"
+
+if "$BUILDER" \
+  --manifest "$MANIFEST" \
+  --target integerTarget \
+  --source "$FIXTURES/patch_native_too_many_arguments.swift" \
+  --output "$TEMP/native-too-many.hfpatch" \
+  2>"$TEMP/native-too-many.stderr"; then
+  echo "error: patch builder accepted an oversized native host call" >&2
+  exit 1
+fi
+grep -Fq 'native call exceeds maximum host argument count' \
+  "$TEMP/native-too-many.stderr"
+test ! -e "$TEMP/native-too-many.hfpatch"
+
+"$PATCH_TOOL" lower-hfir \
+  "$MANIFEST" \
+  instanceTarget \
+  "$FIXTURES/patch_native_cxx_method.ll" \
+  "$TEMP/native-cxx-method.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/native-cxx-method.hfpatch" >"$TEMP/native-cxx-method.hfir.txt"
+grep -Fq 'native-cxx C++._ZN16ReleasedCounter8multiplyEl' \
+  "$TEMP/native-cxx-method.hfir.txt"
+grep -Fq '(receiver: handle, i64)' "$TEMP/native-cxx-method.hfir.txt"
+grep -Fq 'host.call' "$TEMP/native-cxx-method.hfir.txt"
+
+"$BUILDER" \
   --manifest "$SETUP_UI_MANIFEST" \
   --target setupUI \
   --source "$FIXTURES/patch_setup_ui.swift" \

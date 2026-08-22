@@ -23,6 +23,7 @@ Swift patch source + app Target Manifest
   -> Apple Swift 6.2.4 swiftc -emit-bc
   -> HotfixPatchTool exact ABI validation
   -> LLVM-to-HFIR semantic lowering
+  -> descriptor-driven host.call imports for C / Swift / C++ symbols
   -> deterministic .hfpatch v1 artifact
 
 HFIR package model
@@ -36,6 +37,12 @@ Released source branch + edited @HotfixPatch function + released Target Manifest
   -> HotfixPatchTool exact-symbol/ABI validation and HFIR lowering
   -> one 0x<targetID>.hfpatch per annotated function
 ```
+
+Native direct calls are limited to 16 non-receiver arguments. C++ member calls
+additionally require the declaration attribute
+`"irhotfix.receiver-index"="N"`; the lowerer never guesses `this` from a
+mangled symbol or the first pointer argument. Unsupported call shapes are
+rejected while building the patch rather than deferred to runtime.
 
 Do not pass `libHotfixPass.dylib` to Apple `swift-frontend` with
 `-load-pass-plugin`. The plugin is compiled against the Homebrew/upstream LLVM
@@ -108,6 +115,12 @@ absence of LLVM IR and Swift mangled symbols from the published container.
 It also executes the C++20 VM against arithmetic and descriptor-driven
 Objective-C packages.
 
+External direct calls are published as typed Host Imports. Classification uses
+LLVM calling convention, Swift's explicit `swiftself` attribute, and C++ symbol
+identity; runtime invocation is performed only by a matching registered
+`HFHostCallDescriptor`. The lowerer does not emit `dlsym` casts or signature
+switches.
+
 ## Patch-branch extraction
 
 Build the release normally and archive its bundled
@@ -133,8 +146,8 @@ The generated macro peer calls the annotated original function solely to make
 the compiler-emitted relationship explicit. `HotfixPatchTool
 extract-annotated` follows that anchor, selects the real modified definition,
 requires an exact baseline symbol match, validates the published descriptor,
-and publishes the semantic `.hfpatch`. A compatibility `.irpatch` is emitted
-alongside it during the transition. The lowerer rejects unknown LLVM
+and publishes the semantic `.hfpatch`. An inspectable `.irpatch` intermediate
+may be emitted for build diagnostics but is not a runtime format. The lowerer rejects unknown LLVM
 instructions and calls with the exact offending instruction; it never
 substitutes a guessed value.
 
@@ -165,8 +178,8 @@ no-op remains incremental. Response-file contents still participate through
 Xcode's normal compile invocation; they are not part of this tool fingerprint.
 
 The wrapper forwards object jobs whose primary basename is `Hotfix.swift` or
-`LLVMIRInterpreter.swift` directly to Apple `swift-frontend`. This prevents the
-runtime files under `SDK/IRHotfixSDK/Runtime` from instrumenting themselves.
+`HotfixHostAdapter.swift` directly to Apple `swift-frontend`. This prevents the
+runtime and Swift host-adapter gateways from instrumenting themselves.
 Rename or split those files only after updating and testing the exclusion rule.
 
 To run focused integration tests on an installed simulator:
@@ -249,11 +262,9 @@ entry:
 }
 ```
 
-The runtime initially represents the synthetic `%self` argument as
-`.pointer(0)`. At entry, the interpreter replaces only that designated argument
-with a structured host handle registered in `LLVMHostContext`; an ordinary null
-pointer remains nil. Patch execution is synchronous and the receiver is not
-retained. UIKit bridging requires the main thread.
+The runtime marshals the synthetic `%self` argument as a synchronous borrowed
+`HFHandle`; an ordinary null pointer remains nil. Patch execution is synchronous
+and the receiver is not retained. UIKit bridging requires the main thread.
 
 The patch author must make the entry return kind agree with the canonical
 signature return kind. The runtime checks entry parameter types, but it does not
@@ -329,36 +340,9 @@ synchronous storage, but an erroneous external C caller can still cause a
 process crash rather than a native fallback.
 
 Direct recursive calls inside the native clone are rewritten to call the clone,
-so native recursion does not keep entering the trampoline. Patch recursion is
-guarded by a thread-local set of active target IDs: re-entry into the same target
-falls back, while a different target may be nested on the same thread.
-
-Patch registry reads and writes are serialized with `NSLock`. Each operation
-copies or publishes a complete value-state snapshot, and persistence uses
-`UserDefaults`; this is a teaching implementation, not a lock-free hot path or
-a transactional remote-patch store.
-
-## Interpreter execution bounds
-
-One `LLVMIRInterpreter.run` creates a single budget shared by the root entry and
-every interpreted function it calls:
-
-- At most 200,000 basic-block visits are allowed across the whole run. Entering
-  a block consumes one step; individual instructions do not each consume a
-  separate step. Loops and callees therefore draw from the same counter.
-- At most four interpreted function frames can be active at once: the root plus
-  no more than three callees. Recursion, mutual recursion, and even a finite
-  five-frame call chain fail with the call-depth error.
-- `insertvalue` indices are restricted to `0..<1024`, so interpreter-created
-  aggregates contain at most 1,024 elements. Negative, 1,024, and larger indices
-  fail before growing an aggregate.
-
-Duplicate basic-block labels, unsafe aggregate indices, and nonfinite,
-fractional, or out-of-range integer spellings throw parser/runtime errors. A
-patch invoked through `hf_vm_invoke` converts those errors and the execution
-budget errors into a non-applied status, so the trampoline takes its native
-fallback. A direct call to `LLVMIRInterpreter.run` receives the corresponding
-error.
+so native recursion does not keep entering the trampoline. HFIR execution uses
+the C++ VM's instruction budget and call-depth limit; verified packages contain
+no runtime-parsed LLVM text.
 
 ## Descriptor section
 
@@ -417,7 +401,7 @@ Tools/HotfixPass/swift-patch-build \
   --manifest /path/to/IR.app/HotfixTargetManifest.json \
   --target setupUI \
   --source IR/PatchSources/HotfixSetupUI.swift \
-  --output IR/Patches/HotfixSetupUI.irpatch
+  --output IR/Patches/HotfixSetupUI.hfpatch
 ```
 
 `--target` accepts an exact mangled symbol, hexadecimal target ID, or a unique
@@ -438,11 +422,10 @@ implementation in the `hotfixPatch` body. Calls into UIKit, Objective-C, Swift
 runtime functions, and intrinsics remain external and are handled or explicitly
 rejected by the VM at execution time.
 
-The output is the complete text Patch consumed by
-`installAndActivate(textPatch:)`. Rebuild it whenever the matching app's
-Manifest symbol or ABI changes. After overwriting a bundled `.irpatch`, rebuild
-the app so Xcode copies the new resource; a downloaded Patch can be distributed
-without rebuilding the app.
+The text output is an inspectable build intermediate. `HotfixPatchTool` lowers
+it to the publishable `.hfpatch`, which is the only patch format accepted by the
+app runtime. Rebuild it whenever the matching app's Manifest symbol or ABI
+changes.
 
 ## Debug compromises and production limits
 

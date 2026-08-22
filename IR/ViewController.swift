@@ -26,26 +26,20 @@ class ViewController: UIViewController {
         self.view.addSubview(view)
     }
 
-    private func runHotfixDemo() -> [HotfixActivation] {
+    private func runHotfixDemo() -> [HotfixBinaryActivation] {
         let manager = HotfixManager.shared
-        let calculator = HotfixableCalculator()
-        print("Hotfix demo native: add=\(hotfixableAdd(41)), multiply=\(calculator.multiply(21))")
-
-        var activations: [HotfixActivation] = []
         do {
-            for resourceName in ["HotfixAdd", "HotfixMultiply", "HotfixSetupUI"] {
-                guard let url = Bundle.main.url(forResource: resourceName, withExtension: "irpatch") else {
-                    throw CocoaError(.fileNoSuchFile)
-                }
-                let textPatch = try String(contentsOf: url, encoding: .utf8)
-                activations.append(try manager.installAndActivate(textPatch: textPatch))
+            guard let url = Bundle.main.url(
+                forResource: "HotfixSetupUI",
+                withExtension: "hfpatch"
+            ) else {
+                throw CocoaError(.fileNoSuchFile)
             }
-            print("Hotfix demo patched: add=\(hotfixableAdd(41)), multiply=\(calculator.multiply(21))")
-            return activations
+            let activation = try manager.installAndActivate(
+                binaryPatch: Data(contentsOf: url)
+            )
+            return [activation]
         } catch {
-            for activation in activations {
-                manager.deactivate(activation)
-            }
             print("Hotfix demo error: \(error)")
             return []
         }

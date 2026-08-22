@@ -139,3 +139,22 @@ if "$LLVM_ROOT/llvm-objdump" --macho --section-headers "$TEMP/Hotfix.o" |
   echo "error: excluded Hotfix.swift contains a hotfix descriptor section" >&2
   exit 1
 fi
+
+cp "$FIXTURES/Hotfix.swift" "$TEMP/HotfixHostAdapter.swift"
+IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
+  -Onone \
+  -parse-as-library \
+  -c "$TEMP/HotfixHostAdapter.swift" \
+  -module-name HotfixHostAdapterExcludedFixture \
+  -sdk "$SDK" \
+  -o "$TEMP/HotfixHostAdapter.o"
+if grep -Fq '.hotfix_original' <(
+  "$LLVM_ROOT/llvm-nm" "$TEMP/HotfixHostAdapter.o"
+); then
+  echo "error: excluded HotfixHostAdapter.swift was instrumented" >&2
+  exit 1
+fi
+if [[ -e "$TEMP/HotfixHostAdapter.o.hotfix-targets.json" ]]; then
+  echo "error: excluded HotfixHostAdapter.swift emitted a target manifest" >&2
+  exit 1
+fi

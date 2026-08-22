@@ -54,10 +54,18 @@ target_link_libraries(HotfixPatchTool PRIVATE IRHotfixFormat)
 
 add_executable(HotfixPackageTool Sources/HotfixPackageTool.cpp)
 target_compile_features(HotfixPackageTool PRIVATE cxx_std_20)
+target_include_directories(
+  HotfixPackageTool
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+)
 target_link_libraries(HotfixPackageTool PRIVATE IRHotfixFormat)
 
 add_executable(HFIRFormatTests Tests/HFIRFormatTests.cpp)
 target_compile_features(HFIRFormatTests PRIVATE cxx_std_20)
+target_include_directories(
+  HFIRFormatTests
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+)
 target_link_libraries(HFIRFormatTests PRIVATE IRHotfixFormat)
 
 if(APPLE)
@@ -66,6 +74,7 @@ if(APPLE)
     Tests/HFIRVMTests.cpp
     ../../SDK/IRHotfixSDK/VM/HFIRRuntime.cpp
     ../../SDK/IRHotfixSDK/Bridge/IRHotfixObjCBridge.mm
+    ../../SDK/IRHotfixSDK/HostAdapter/HFHostAdapterRegistry.cpp
   )
   target_compile_features(HFIRVMTests PRIVATE cxx_std_20)
   target_compile_options(
@@ -77,6 +86,7 @@ if(APPLE)
     PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/VM"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/Bridge"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/HostAdapter"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
   )
   target_link_libraries(HFIRVMTests PRIVATE IRHotfixFormat "-framework Foundation")

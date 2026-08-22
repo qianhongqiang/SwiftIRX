@@ -8,6 +8,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -404,6 +405,10 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
   BasicBlock *entry = BasicBlock::Create(context, "entry", &function);
   BasicBlock *patched =
       BasicBlock::Create(context, "hotfix.patched", &function);
+  BasicBlock *notApplied =
+      BasicBlock::Create(context, "hotfix.not_applied", &function);
+  BasicBlock *committed =
+      BasicBlock::Create(context, "hotfix.committed", &function);
   BasicBlock *fallback =
       BasicBlock::Create(context, "hotfix.fallback", &function);
   IRBuilder<> builder(entry);
@@ -554,7 +559,22 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
       builder.CreateCall(runtimeInvoke, {frame}, "hotfix.status");
   Value *applied = builder.CreateICmpEQ(
       status, builder.getInt32(HFStatusApplied), "hotfix.applied");
-  builder.CreateCondBr(applied, patched, fallback);
+  builder.CreateCondBr(applied, patched, notApplied);
+
+  builder.SetInsertPoint(notApplied);
+  Value *effectsCommitted = builder.CreateICmpEQ(
+      status, builder.getInt32(HFStatusExecutionCommitted),
+      "hotfix.effects_committed");
+  builder.CreateCondBr(effectsCommitted, committed, fallback);
+
+  builder.SetInsertPoint(committed);
+  if (function.getReturnType()->isVoidTy()) {
+    builder.CreateRetVoid();
+  } else {
+    Function *trap = Intrinsic::getDeclaration(&module, Intrinsic::trap);
+    builder.CreateCall(trap);
+    builder.CreateUnreachable();
+  }
 
   builder.SetInsertPoint(patched);
   if (function.getReturnType()->isVoidTy()) {

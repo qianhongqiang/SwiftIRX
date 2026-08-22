@@ -1,5 +1,7 @@
 #include "HFIRLowering.h"
 
+#include "HFPatchFrame.h"
+
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/Constants.h"
@@ -134,7 +136,7 @@ public:
   FunctionLowerer(Module &, Function &function, std::uint64_t targetID,
                   std::uint64_t signatureID)
       : function_(function) {
-    package_.abiVersion = 1;
+    package_.abiVersion = HF_ABI_VERSION;
     package_.patchID = "hfir." + utohexstr(targetID, true, 16);
     package_.target = {targetID, signatureID, 0};
     output_.name = "patch";
@@ -377,7 +379,8 @@ private:
   std::uint32_t hostImport(hfir::HostImportKind kind, StringRef owner,
                            StringRef name, hfir::ValueType returnType,
                            const std::vector<hfir::ValueType> &parameters,
-                           bool hasReceiver) {
+                           bool hasReceiver,
+                           std::optional<std::uint64_t> explicitID = std::nullopt) {
     std::string key = std::to_string(static_cast<unsigned>(kind)) + ":" +
                       owner.str() + ":" + name.str() + ":" +
                       hfir::valueTypeName(returnType) + ":" +
@@ -388,7 +391,7 @@ private:
         found != importIndices_.end())
       return found->second;
     hfir::HostImport import;
-    import.id = fnv1a64(key);
+    import.id = explicitID.value_or(fnv1a64(key));
     import.kind = kind;
     import.owner = owner.str();
     import.name = name.str();
@@ -633,7 +636,107 @@ private:
     if (name.contains("assertionFailure") &&
         isa<UnreachableInst>(call.getParent()->getTerminator()))
       return true;
-    return fail(call, "unsupported call to '" + name.str() + "'");
+    return lowerNativeCall(call, *callee);
+  }
+
+  bool lowerNativeCall(CallBase &call, Function &callee) {
+    const StringRef symbol = callee.getName();
+    if (callee.isVarArg())
+      return fail(call, "variadic native calls are unsupported");
+    if (call.hasOperandBundles())
+      return fail(call, "native call operand bundles are unsupported");
+    hfir::HostImportKind kind;
+    std::string owner;
+    std::optional<unsigned> receiverIndex;
+
+    if (symbol.starts_with("$s") ||
+        call.getCallingConv() == CallingConv::Swift ||
+        call.getCallingConv() == CallingConv::SwiftTail) {
+      kind = hfir::HostImportKind::NativeSwift;
+      owner = "Swift";
+      for (unsigned index = 0; index < call.arg_size(); ++index) {
+        if (call.paramHasAttr(index, Attribute::SwiftSelf)) {
+          if (receiverIndex)
+            return fail(call, "native Swift call has multiple receivers");
+          receiverIndex = index;
+        }
+      }
+    } else if (symbol.starts_with("_Z")) {
+      kind = hfir::HostImportKind::NativeCXX;
+      owner = "C++";
+      const Attribute receiverAttribute =
+          callee.getFnAttribute("irhotfix.receiver-index");
+      if (receiverAttribute.isValid()) {
+        unsigned explicitReceiver = 0;
+        if (receiverAttribute.getValueAsString().getAsInteger(
+                10, explicitReceiver) || explicitReceiver >= call.arg_size())
+          return fail(call, "invalid explicit C++ receiver index");
+        receiverIndex = explicitReceiver;
+      }
+    } else {
+      if (call.getCallingConv() != CallingConv::C &&
+          call.getCallingConv() != CallingConv::Fast &&
+          call.getCallingConv() != CallingConv::Cold)
+        return fail(call, "unsupported native calling convention");
+      kind = hfir::HostImportKind::NativeC;
+    }
+
+    if (!call.getType()->isVoidTy() && !registers_.contains(&call))
+      return fail(call, "native return type has no HFIR representation");
+    const hfir::ValueType returnType = call.getType()->isVoidTy()
+        ? hfir::ValueType::Void
+        : registers_.at(&call).type;
+    if (call.getType()->isIntegerTy() && !call.getType()->isIntegerTy(1) &&
+        !call.getType()->isIntegerTy(64))
+      return fail(call, "native integer return must be i1 or i64");
+
+    std::vector<hfir::ValueType> parameterTypes;
+    std::vector<hfir::Operand> operands;
+    std::optional<RegisterValue> receiver;
+    for (unsigned index = 0; index < call.arg_size(); ++index) {
+      if (call.paramHasAttr(index, Attribute::StructRet) ||
+          call.paramHasAttr(index, Attribute::ByVal) ||
+          call.paramHasAttr(index, Attribute::InAlloca) ||
+          call.paramHasAttr(index, Attribute::Preallocated) ||
+          call.paramHasAttr(index, Attribute::SwiftError) ||
+          call.paramHasAttr(index, Attribute::SwiftAsync))
+        return fail(call, "native call uses an unsupported ABI parameter");
+      Value *argumentValue = call.getArgOperand(index);
+      if (argumentValue->getType()->isIntegerTy() &&
+          !argumentValue->getType()->isIntegerTy(1) &&
+          !argumentValue->getType()->isIntegerTy(64))
+        return fail(call, "native integer argument must be i1 or i64");
+      const auto type = semanticType(argumentValue);
+      if (!type || *type == hfir::ValueType::Void)
+        return fail(call, "native argument has no HFIR representation");
+      const auto lowered = registerFor(argumentValue, *type);
+      if (!lowered)
+        return fail(call, "cannot lower native argument");
+      if (receiverIndex && *receiverIndex == index) {
+        if (*type != hfir::ValueType::Handle)
+          return fail(call, "native receiver must be a host handle");
+        receiver = *lowered;
+      } else {
+        parameterTypes.push_back(*type);
+        operands.push_back(reg(*lowered));
+      }
+    }
+
+    const bool hasReceiver = receiver.has_value();
+    if (parameterTypes.size() > hfir::kMaximumHostArgumentCount)
+      return fail(call, "native call exceeds maximum host argument count");
+    const std::uint32_t import = hostImport(
+        kind, owner, symbol, returnType, parameterTypes, hasReceiver,
+        fnv1a64(symbol));
+    std::vector<hfir::Operand> callOperands = {imported(import)};
+    if (receiver)
+      callOperands.push_back(reg(*receiver));
+    callOperands.insert(callOperands.end(), operands.begin(), operands.end());
+    if (returnType == hfir::ValueType::Void) {
+      emitEffect(hfir::Opcode::HostCall, std::move(callOperands));
+      return true;
+    }
+    return emitResult(call, hfir::Opcode::HostCall, std::move(callOperands));
   }
 
   bool lowerFrameConstructor(CallBase &call, StringRef name) {

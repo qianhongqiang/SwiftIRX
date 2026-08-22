@@ -13,8 +13,7 @@ IRHotfixSDK/
 │   └── IRHotfixABI.h
 ├── Runtime/
 │   ├── Hotfix.swift
-│   ├── HotfixPatchAnnotation.swift
-│   └── LLVMIRInterpreter.swift
+│   └── HotfixPatchAnnotation.swift
 ├── Format/
 │   ├── HFIR.h
 │   ├── HFIR.cpp
@@ -28,40 +27,59 @@ IRHotfixSDK/
 ├── VM/
 │   ├── HFIRRuntime.h
 │   └── HFIRRuntime.cpp
+├── HostAdapter/
+│   ├── HFHostAdapter.h
+│   ├── HFHostAdapter.hpp
+│   ├── HFHostAdapterRegistry.cpp
+│   └── HotfixHostAdapter.swift
 └── Support/
     └── IRHotfix-Bridging-Header.h
 ```
 
 - `ABI/` is the versioned public C boundary shared by compiler-generated
-  trampolines, the VM gateway, and future native adapters. `HFPatchFrame` is
+  trampolines, the VM gateway, and native host adapters. `HFPatchFrame` is
   the sole invocation envelope; its embedded `HFHandle` and `HFValue` fields
   do not expose Swift or Objective-C object layouts.
-- `Runtime/Hotfix.swift` contains the text-patch compatibility registry, binary
-  patch lifecycle API, fallback gateway, and Codable Target Manifest model.
+- `Runtime/Hotfix.swift` contains the binary patch lifecycle API, HFIR gateway,
+  and Codable Target Manifest model.
 - `Runtime/HotfixPatchAnnotation.swift` declares the build-only
   `@HotfixPatch` marker used to select changed functions on a patch branch.
-- `Runtime/LLVMIRInterpreter.swift` parses and executes the supported LLVM IR
-  subset and owns structured host handles for objects, selectors, and classes.
 - `Format/` defines typed HFIR v1, the deterministic `.hfpatch` v1 container,
   semantic validation, binary encoding/decoding, and human-readable dumping.
   It is C++20 with no LLVM dependency so the same code runs in host tools and
   the iOS VM.
 - `VM/HFIRRuntime.cpp` owns the validated HFIR registry and C++20 interpreter.
   It executes typed registers, locals, control flow, calls, strings, and
-  descriptor-driven Objective-C operations with instruction/call-depth limits.
-- `Bridge/IRHotfixObjCBridge.h` exposes a stable C ABI to Swift and future VM
+  descriptor-driven host operations with instruction/call-depth limits.
+- `HostAdapter/HFHostAdapter.h` defines the stable descriptor, call frame,
+  registry and gateway C ABI shared by Objective-C, C, Swift and C++.
+- `HostAdapter/HFHostAdapterRegistry.cpp` validates descriptors and values,
+  owns adapter contexts safely across concurrent invocations, and routes every
+  host call without a per-symbol switch. Objective-C is a built-in adapter;
+  native languages register ABI-owning gateways.
+- `HostAdapter/HFHostAdapter.hpp` provides compile-time C/C++ scalar and method
+  thunks. `HotfixHostAdapter.swift` provides one shared C trampoline backed by
+  Swift closures, so each Swift function does not require handwritten marshal
+  code.
+- `Bridge/IRHotfixObjCBridge.h` exposes the Objective-C invocation ABI used by VM
   cores.
 - `Bridge/IRHotfixObjCBridge.mm` resolves Objective-C method signatures at
   runtime and invokes methods without a per-selector implementation table.
-- `Bridge/IRHotfixValue.h` defines the adapter-neutral `IRHFValue` ABI that the
-  future C, Swift, and C++ descriptor-driven adapters can share.
+- `Bridge/IRHotfixValue.h` defines the bridge-local `IRHFValue` representation
+  used between the generic host registry and `NSInvocation`; native adapters
+  use the public `HFValue` and `HFHostCallFrame` ABI instead.
 - `Support/IRHotfix-Bridging-Header.h` is the app target's Swift bridging-header
   integration point.
 
-`HF_ABI_VERSION` is currently `1`. Every caller writes both `abiVersion` and
-`structSize`; the runtime validates them before reading arguments. A trampoline
-uses the patch result only for `HFStatusApplied`. `HFStatusNoPatch` and every
-validation/execution failure preserve the original implementation fallback.
+`HF_ABI_VERSION` is currently `2`. Version 2 adds committed-execution status
+semantics; an older trampoline is rejected before patch execution. Every caller
+writes both `abiVersion` and `structSize`; the runtime validates them before
+reading arguments. A trampoline
+uses the patch result only for `HFStatusApplied`. Failures before host effects
+begin preserve the original implementation fallback. After a potentially
+effectful host call begins, `HFStatusExecutionCommitted` suppresses fallback;
+void functions return and value-returning functions trap rather than run the
+original implementation with duplicated effects.
 
 For the first version, an object receiver is represented by a structured,
 synchronous borrowed `HFHandle`. Its token temporarily carries the host address
@@ -69,8 +87,68 @@ behind the `HFHandleFlagBorrowedAddress` flag. Consumers must still treat the
 token as opaque: a later handle table can replace that token meaning without
 changing `HFPatchFrame` layout.
 
-`ir_hotfix_invoke` remains only as a compatibility adapter for existing callers;
-new compiler output calls `hf_vm_invoke` directly.
+Compiler output calls the status-returning `hf_vm_invoke` directly. The app has
+no Boolean compatibility gateway and no runtime LLVM-text interpreter.
+
+## Native Host Adapters
+
+External calls in patch source lower to `host.call` imports. The lowerer uses
+explicit LLVM calling-convention and `swiftself` metadata to classify them as
+`native-c`, `native-swift`, or `native-cxx`. Unsupported varargs, indirect
+calls, hidden ABI parameters, and noncanonical integer widths fail compilation.
+
+A Swift host function can be registered once at app startup:
+
+```swift
+let call = HotfixSwiftHostCall(
+    symbol: "$s2IR14nativeMultiplyyS2iF",
+    returnKind: HFValueKind(HFValueKindSignedInteger),
+    argumentKinds: [HFValueKind(HFValueKindSignedInteger)]
+)
+let registration = try HotfixSwiftHostAdapter.register(call) { _, arguments in
+    HFMakeValue(HFValueKind(HFValueKindSignedInteger), arguments[0].bits &* 2)
+}
+```
+
+Keep the returned registration alive while patches may call the symbol. C uses
+`hf_host_adapter_register` with an `HFHostAdapterEntry`. C++ can use
+`irhotfix::host::registerFunction` or `registerMethod`; templates perform typed
+marshal at compile time. In all cases, the VM sees only `HFValue`, `HFHandle`
+and `HFHostCallFrame`, never a native function pointer ABI.
+
+Native imports are preflighted before the first patch instruction, so a missing
+or signature-mismatched adapter cannot fail after earlier host side effects.
+Registrations carry opaque generation tokens to make stale unregister calls
+harmless. Keep registrations alive for every active patch that references them;
+Swift handlers are `@Sendable` and may be invoked concurrently unless marked
+main-thread-only.
+
+HFIR `i64` is a canonical 64-bit bit pattern and uses
+`HFValueKindSignedInteger` in host descriptors; the C++ `UInt64` codec preserves
+all bits while using that same descriptor identity. C++ member receivers are
+never inferred from a mangled name or first pointer argument. Compiler-authored
+LLVM must declare `"irhotfix.receiver-index"="N"`; without that explicit
+descriptor metadata, the call remains a free/static function call.
+
+Non-null borrowed handles must remain valid for the complete patch invocation.
+A retained handle is accepted only from an adapter registered with
+`HFHostCallFlagObjCCompatibleHandles`, because the VM releases it through the
+Objective-C runtime. Unmanaged C/C++ pointers must therefore use borrowed
+ownership and an application-managed lifetime. Aggregate result buffers are
+borrowed only long enough for the VM's immediate copy.
+The VM acquires strong adapter leases during preflight and holds them through
+the complete patch invocation, so unregister/re-register cannot invalidate
+borrowed results or context storage while they are consumed. Native code using
+the public C API must also use `hf_host_adapter_acquire` plus
+`hf_host_adapter_invoke_leased` for Bytes or borrowed HostHandle results; the
+one-shot `hf_host_adapter_invoke` accepts only scalar, void, null-handle, and
+retained Objective-C-compatible native results.
+
+Adapters are conservatively treated as potentially effectful. Set
+`HFHostCallFlagNoSideEffects` (or `noSideEffects: true` in the Swift descriptor)
+only when the call never mutates externally visible state, including on error.
+Once any other native adapter or Objective-C operation begins, a later VM fault
+returns `HFStatusExecutionCommitted` and cannot fall back to the original body.
 
 ## Target Manifest
 
@@ -95,30 +173,6 @@ collisions before publishing output.
 App-facing demo code stays under `IR/`. Compiler instrumentation stays under
 `Tools/HotfixPass` because it is a macOS host build tool rather than an iOS
 runtime SDK component.
-
-## Text patch input
-
-Application code installs a patch from text and keeps only the opaque activation
-token:
-
-```swift
-let text = try String(contentsOf: patchURL, encoding: .utf8)
-let activation = try HotfixManager.shared.installAndActivate(textPatch: text)
-defer { HotfixManager.shared.deactivate(activation) }
-```
-
-The text must currently contain exactly one defined LLVM function. That
-function's name is the target symbol and its body is the interpreter entry. The
-SDK derives all other metadata:
-
-- `targetID` from the function name;
-- `signatureID` from the return and parameter types;
-- receiver presence from a leading `ptr` parameter;
-- `patchID` from the complete text payload.
-
-Supported patch ABI types are `i64`, `i1`, and `void`; a leading `ptr` is the
-optional receiver. The demo payloads under `IR/Patches` are complete examples.
-New patches should use the binary `.hfpatch` workflow below.
 
 ## Build a patch from a release branch
 
@@ -150,11 +204,11 @@ The command invokes the real Xcode build so module names, imports, compilation
 conditions, bridging headers, and SDK settings match the application. During
 that build the macro emits a private anchor for each annotation. The compiler
 wrapper resolves the anchor to the modified function's exact mangled symbol,
-requires that symbol and ABI to exist in the baseline Manifest, and writes one
-`0x<targetID>.irpatch` file per selected function. A renamed function, a newly
+requires that symbol and ABI to exist in the baseline Manifest, and lowers each
+selected function through an intermediate `.irpatch`. A renamed function, a newly
 added function, or an ABI-changing edit fails instead of silently producing an
-unusable Patch. It emits both the compatibility `0x<targetID>.irpatch` and the
-publishable `0x<targetID>.hfpatch`. The binary artifact contains typed HFIR,
+unusable Patch. The publishable output is `0x<targetID>.hfpatch`; `.irpatch` is
+only a build/debug intermediate and is never loaded by the app. The binary artifact contains typed HFIR,
 Target and Host Import descriptors, constants, and integrity metadata; it
 contains no LLVM IR or Swift mangled symbol.
 
@@ -166,10 +220,9 @@ let activation = try HotfixManager.shared.installAndActivate(binaryPatch: data)
 defer { HotfixManager.shared.deactivate(activation) }
 ```
 
-`hf_vm_invoke` tries the active HFIR VM first and uses the legacy text engine
-only when the HFIR registry returns `HFStatusNoPatch`. Malformed frames,
-signature mismatches, verifier failures, traps, unsupported host types, and
-off-main-thread Objective-C execution all preserve native fallback.
+`hf_vm_invoke` dispatches only to the active HFIR VM. Malformed frames,
+signature mismatches, verifier failures, traps before host effects, unsupported
+host types, and off-main-thread Objective-C preflight preserve native fallback.
 
 `@HotfixPatch` is intentionally available only while `build-patches` sets
 `IR_HOTFIX_PATCH_BUILD`. The first version accepts non-generic, synchronous,

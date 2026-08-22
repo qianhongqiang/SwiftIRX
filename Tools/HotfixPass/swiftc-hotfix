@@ -249,7 +249,7 @@ fi
 [[ -n "$output_file" ]] || fail "object compile job has no output path"
 
 case "$(basename "$primary_file")" in
-  Hotfix.swift | LLVMIRInterpreter.swift)
+  Hotfix.swift | HotfixHostAdapter.swift)
     diagnose "forwarding excluded source: $primary_file"
     sidecar="$output_file.hotfix-targets.json"
     if [[ -f "$sidecar" ]]; then

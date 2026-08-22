@@ -1,4 +1,5 @@
 #include "HFPatchContainer.h"
+#include "HFPatchFrame.h"
 
 #include <bit>
 #include <cstdint>
@@ -70,7 +71,7 @@ hfir::Package setupUIExample() {
   using hfir::ValueType;
 
   hfir::Package package;
-  package.abiVersion = 1;
+  package.abiVersion = HF_ABI_VERSION;
   package.patchID = "example.setup-ui.hfir-v1";
   package.target = {0x1232093bb65a3a2bULL, 0x3fc60f0529f431f8ULL, 0};
   package.constants = {

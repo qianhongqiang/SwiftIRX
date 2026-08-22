@@ -32,14 +32,21 @@ compare.eq/ne/lt/le/gt/ge
 branch branch.conditional return trap
 local.alloc local.load local.store
 object.class object.construct object.invoke object.release
-string.constant function.call
+string.constant function.call host.call
 ```
 
 Calls do not name Swift runtime functions or raw addresses. `object.*` resolves
 an indexed Host Import descriptor. Each descriptor contains a stable ID, an
 operation kind, owner/name metadata, an optional Objective-C type encoding, a
-receiver flag, and typed arguments/results. Future C, Swift and C++ gateways use
+receiver flag, and typed arguments/results. C, Swift and C++ gateways use
 the same descriptor slot without adding new VM opcodes per function or type.
+`host.call` dispatches `native-c`, `native-swift`, and `native-cxx` imports to
+the stable Host Adapter registry. A registered gateway owns the real native ABI;
+the VM never casts a symbol address or guesses register/stack placement.
+Host imports contain at most 16 non-receiver parameters. HFIR `i64` is a
+canonical 64-bit bit pattern and maps to `HFValueKindSignedInteger` at the host
+gateway; signed and unsigned native code preserve the same bits behind that
+single descriptor identity.
 
 `hfir::verify` rejects malformed types, references, register definitions,
 terminators, call signatures, imports, constants, debug locations, and entry

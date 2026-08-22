@@ -1,6 +1,7 @@
 #ifndef IRHotfixSDK_HFIR_h
 #define IRHotfixSDK_HFIR_h
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -9,6 +10,7 @@
 namespace irhotfix::hfir {
 
 inline constexpr std::uint16_t kVersion = 1;
+inline constexpr std::size_t kMaximumHostArgumentCount = 16;
 inline constexpr std::uint32_t kNoRegister =
     std::numeric_limits<std::uint32_t>::max();
 
@@ -42,6 +44,9 @@ enum class HostImportKind : std::uint8_t {
   Constructor = 2,
   Method = 3,
   Service = 4,
+  NativeC = 5,
+  NativeSwift = 6,
+  NativeCXX = 7,
 };
 
 enum class OperandKind : std::uint8_t {
@@ -90,6 +95,7 @@ enum class Opcode : std::uint16_t {
   ObjectRelease = 53,
   StringConstant = 54,
   FunctionCall = 55,
+  HostCall = 56,
 };
 
 struct Constant {
@@ -159,7 +165,7 @@ struct Signature {
 };
 
 struct Package {
-  std::uint32_t abiVersion = 1;
+  std::uint32_t abiVersion = 2;
   std::string patchID;
   TargetDescriptor target;
   std::vector<Constant> constants;

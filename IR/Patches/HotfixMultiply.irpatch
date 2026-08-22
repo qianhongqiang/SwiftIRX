@@ -1,5 +1,0 @@
-define i64 @"$s2IR20HotfixableCalculatorC8multiplyyS2iF"(ptr %self, i64 %value) {
-entry:
-  %result = add i64 %value, 100
-  ret i64 %result
-}

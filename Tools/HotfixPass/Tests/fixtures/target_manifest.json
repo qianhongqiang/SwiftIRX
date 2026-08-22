@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "abiVersion": 1,
+  "abiVersion": 2,
   "targets": [
     {
       "symbol": "instanceTarget",

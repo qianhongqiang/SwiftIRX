@@ -2,6 +2,7 @@
 
 #include "../Bridge/IRHotfixObjCBridge.h"
 #include "../Format/HFPatchContainer.h"
+#include "../HostAdapter/HFHostAdapter.h"
 
 #include <atomic>
 #include <bit>
@@ -20,6 +21,7 @@ using namespace irhotfix;
 
 constexpr std::uint64_t kInstructionBudget = 100'000;
 constexpr std::uint32_t kMaximumCallDepth = 64;
+static_assert(hfir::kMaximumHostArgumentCount == HF_MAX_HOST_ARGUMENT_COUNT);
 
 struct VMValue {
   hfir::ValueType type = hfir::ValueType::Void;
@@ -158,8 +160,14 @@ private:
 class Executor {
 public:
   explicit Executor(const hfir::Package &package) : package_(package) {}
+  ~Executor() {
+    for (const auto &[importID, lease] : nativeLeases_)
+      hf_host_adapter_release(lease);
+  }
 
   bool invoke(const HFPatchFrame &frame, VMValue &result) {
+    if (!preflightHostImports())
+      return false;
     const hfir::Function &entry =
         package_.functions[package_.target.entryFunction];
     std::vector<VMValue> arguments;
@@ -192,6 +200,8 @@ public:
     return executeFunction(package_.target.entryFunction, arguments, result,
                            budget, 0);
   }
+
+  bool hostEffectsStarted() const { return hostEffectsStarted_; }
 
 private:
   static bool decodeFrameValue(const HFValue &source, hfir::ValueType expected,
@@ -470,21 +480,17 @@ private:
           break;
         }
         case hfir::Opcode::ObjectClass: {
-          if (!IRHFObjCIsMainThread())
-            return false;
           const hfir::HostImport &import =
               package_.imports[instruction.operands[0].index];
-          void *objectClass = IRHFObjCLookUpClass(import.owner.c_str());
-          if (objectClass == nullptr ||
-              !assign(VMValue::borrowedObject(hfir::ValueType::Handle,
-                                              objectClass)))
+          VMValue returned;
+          if (!invokeHostImport(import, nullptr, {}, returned) ||
+              !assign(std::move(returned)))
             return false;
           break;
         }
         case hfir::Opcode::ObjectConstruct:
-        case hfir::Opcode::ObjectInvoke: {
-          if (!IRHFObjCIsMainThread())
-            return false;
+        case hfir::Opcode::ObjectInvoke:
+        case hfir::Opcode::HostCall: {
           const hfir::HostImport &import =
               package_.imports[instruction.operands[0].index];
           std::size_t cursor = 1;
@@ -497,28 +503,21 @@ private:
               return false;
             receiver = receiverValue->object;
           }
-          std::vector<IRHFValue> hostArguments;
+          std::vector<HFValue> hostArguments;
           hostArguments.reserve(instruction.operands.size() - cursor);
           for (; cursor < instruction.operands.size(); ++cursor) {
             const VMValue *argument = operand(cursor);
-            IRHFValue hostValue = {};
+            HFValue hostValue = {};
             if (argument == nullptr || !marshalHostValue(*argument, hostValue))
               return false;
             hostArguments.push_back(hostValue);
           }
-          IRHFObjCInvocationResult invocation =
-              instruction.opcode == hfir::Opcode::ObjectConstruct
-                  ? IRHFObjCConstruct(receiver, import.name.c_str(),
-                                      hostArguments.data(), hostArguments.size())
-                  : IRHFObjCInvoke(receiver, import.name.c_str(),
-                                   hostArguments.data(), hostArguments.size());
-          if (invocation.status != IRHFObjCInvocationStatusSuccess)
+          VMValue returned;
+          if (!invokeHostImport(import, receiver, hostArguments, returned))
             return false;
           if (import.returnType == hfir::ValueType::Void)
             break;
-          VMValue returned;
-          if (!unmarshalHostValue(invocation.value, import.returnType, returned) ||
-              !assign(std::move(returned)))
+          if (!assign(std::move(returned)))
             return false;
           break;
         }
@@ -580,24 +579,26 @@ private:
     }
   }
 
-  static bool marshalHostValue(const VMValue &value, IRHFValue &result) {
-    result = {};
+  static bool marshalHostValue(const VMValue &value, HFValue &result) {
+    result = HFMakeValue(HFValueKindInvalid, 0);
     switch (value.type) {
     case hfir::ValueType::Bool:
-      result.kind = IRHFValueKindBool;
+      result.kind = HFValueKindBool;
       result.bits = value.bits;
       return true;
     case hfir::ValueType::I64:
-      result.kind = IRHFValueKindSignedInteger;
+      result.kind = HFValueKindSignedInteger;
       result.bits = value.bits;
       return true;
     case hfir::ValueType::F64:
-      result.kind = IRHFValueKindFloat64;
+      result.kind = HFValueKindFloat64;
       result.bits = value.bits;
       return true;
     case hfir::ValueType::Handle:
     case hfir::ValueType::String:
-      result.kind = IRHFValueKindObject;
+      result.kind = HFValueKindHostHandle;
+      result.flags = value.object == nullptr ? HFValueFlagNone
+                                             : HFValueFlagBorrowedHostHandle;
       result.bits = static_cast<std::uint64_t>(
           reinterpret_cast<std::uintptr_t>(value.object));
       return true;
@@ -605,8 +606,8 @@ private:
     case hfir::ValueType::Point:
     case hfir::ValueType::Size:
     case hfir::ValueType::Rect:
-      result.kind = IRHFValueKindBytes;
-      result.bytes = value.bytes.data();
+      result.kind = HFValueKindBytes;
+      result.bytes = value.bytes.empty() ? nullptr : value.bytes.data();
       result.byteCount = value.bytes.size();
       return true;
     default:
@@ -614,36 +615,222 @@ private:
     }
   }
 
-  static bool unmarshalHostValue(const IRHFValue &value,
+  static bool unmarshalHostValue(const HFValue &value,
                                  hfir::ValueType expected, VMValue &result) {
     switch (expected) {
-    case hfir::ValueType::Handle:
-      if (value.kind != IRHFValueKindObject &&
-          value.kind != IRHFValueKindPointer)
+    case hfir::ValueType::Void:
+      if (value.kind != HFValueKindVoid)
         return false;
-      result = VMValue::retainedObject(
-          expected, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-                        value.bits)));
+      result = VMValue::scalar(hfir::ValueType::Void, 0);
+      return true;
+    case hfir::ValueType::Handle:
+    case hfir::ValueType::String:
+      if (value.kind != HFValueKindHostHandle)
+        return false;
+      if (value.bits == 0 && value.flags == HFValueFlagNone) {
+        result = VMValue::borrowedObject(expected, nullptr);
+      } else if (value.flags == HFValueFlagRetainedHostHandle) {
+        result = VMValue::retainedObject(
+            expected, reinterpret_cast<void *>(
+                          static_cast<std::uintptr_t>(value.bits)));
+      } else if (value.flags == HFValueFlagBorrowedHostHandle) {
+        result = VMValue::borrowedObject(
+            expected, reinterpret_cast<void *>(
+                          static_cast<std::uintptr_t>(value.bits)));
+      } else {
+        return false;
+      }
       return true;
     case hfir::ValueType::Bool:
-      if (value.kind != IRHFValueKindBool || value.bits > 1)
+      if (value.kind != HFValueKindBool || value.bits > 1)
         return false;
       result = VMValue::scalar(expected, value.bits);
       return true;
     case hfir::ValueType::I64:
-      if (value.kind != IRHFValueKindSignedInteger &&
-          value.kind != IRHFValueKindUnsignedInteger)
+      if (value.kind != HFValueKindSignedInteger &&
+          value.kind != HFValueKindUnsignedInteger)
         return false;
       result = VMValue::scalar(expected, value.bits);
       return true;
     case hfir::ValueType::F64:
-      if (value.kind != IRHFValueKindFloat64)
+      if (value.kind != HFValueKindFloat64)
         return false;
       result = VMValue::scalar(expected, value.bits);
       return true;
-    default:
+    case hfir::ValueType::Bytes:
+    case hfir::ValueType::Point:
+    case hfir::ValueType::Size:
+    case hfir::ValueType::Rect:
+      if (value.kind != HFValueKindBytes ||
+          (value.byteCount != 0 && value.bytes == nullptr))
+        return false;
+      result = VMValue::aggregate(
+          expected,
+          value.byteCount == 0
+              ? std::vector<std::uint8_t>{}
+              : std::vector<std::uint8_t>(
+                    static_cast<const std::uint8_t *>(value.bytes),
+                    static_cast<const std::uint8_t *>(value.bytes) +
+                        value.byteCount));
+      return true;
+    }
+    return false;
+  }
+
+  static HFValueKind hostValueKind(hfir::ValueType type) {
+    switch (type) {
+    case hfir::ValueType::Void: return HFValueKindVoid;
+    case hfir::ValueType::Bool: return HFValueKindBool;
+    case hfir::ValueType::I64: return HFValueKindSignedInteger;
+    case hfir::ValueType::F64: return HFValueKindFloat64;
+    case hfir::ValueType::Handle:
+    case hfir::ValueType::String: return HFValueKindHostHandle;
+    case hfir::ValueType::Bytes:
+    case hfir::ValueType::Point:
+    case hfir::ValueType::Size:
+    case hfir::ValueType::Rect: return HFValueKindBytes;
+    }
+    return HFValueKindInvalid;
+  }
+
+  static bool buildHostDescriptor(
+      const hfir::HostImport &import,
+      std::vector<HFValueKind> &argumentKinds,
+      HFHostCallDescriptor &descriptor) {
+    argumentKinds.clear();
+    argumentKinds.reserve(import.parameterTypes.size());
+    for (hfir::ValueType type : import.parameterTypes)
+      argumentKinds.push_back(hostValueKind(type));
+
+    descriptor = {};
+    descriptor.abiVersion = HF_HOST_ADAPTER_ABI_VERSION;
+    descriptor.structSize = sizeof(HFHostCallDescriptor);
+    descriptor.importID = import.id;
+    descriptor.returnKind = hostValueKind(import.returnType);
+    descriptor.argumentCount = static_cast<std::uint32_t>(argumentKinds.size());
+    descriptor.owner = import.owner.c_str();
+    descriptor.name = import.name.c_str();
+    descriptor.typeEncoding = import.typeEncoding.c_str();
+    descriptor.argumentKinds =
+        argumentKinds.empty() ? nullptr : argumentKinds.data();
+    descriptor.flags = import.hasReceiver ? HFHostCallFlagHasReceiver
+                                          : HFHostCallFlagNone;
+
+    switch (import.kind) {
+    case hfir::HostImportKind::Class:
+      descriptor.language = HFHostLanguageObjectiveC;
+      descriptor.callKind = HFHostCallKindClassLookup;
+      descriptor.flags |= HFHostCallFlagMainThreadOnly;
+      break;
+    case hfir::HostImportKind::Constructor:
+      descriptor.language = HFHostLanguageObjectiveC;
+      descriptor.callKind = HFHostCallKindConstructor;
+      descriptor.flags |= HFHostCallFlagMainThreadOnly;
+      break;
+    case hfir::HostImportKind::Method:
+    case hfir::HostImportKind::Service:
+      descriptor.language = HFHostLanguageObjectiveC;
+      descriptor.callKind = import.hasReceiver ? HFHostCallKindInstanceMethod
+                                               : HFHostCallKindStaticMethod;
+      descriptor.flags |= HFHostCallFlagMainThreadOnly;
+      break;
+    case hfir::HostImportKind::NativeC:
+      descriptor.language = HFHostLanguageC;
+      descriptor.callKind = HFHostCallKindFunction;
+      break;
+    case hfir::HostImportKind::NativeSwift:
+      descriptor.language = HFHostLanguageSwift;
+      descriptor.callKind = import.hasReceiver ? HFHostCallKindInstanceMethod
+                                               : HFHostCallKindFunction;
+      break;
+    case hfir::HostImportKind::NativeCXX:
+      descriptor.language = HFHostLanguageCXX;
+      descriptor.callKind = import.hasReceiver ? HFHostCallKindInstanceMethod
+                                               : HFHostCallKindFunction;
+      break;
+    }
+    descriptor.signatureID = hf_host_call_signature_id(&descriptor);
+    return descriptor.signatureID != 0;
+  }
+
+  bool preflightHostImports() {
+    std::vector<HFValueKind> argumentKinds;
+    HFHostCallDescriptor descriptor = {};
+    for (const hfir::HostImport &import : package_.imports) {
+      if (!buildHostDescriptor(import, argumentKinds, descriptor))
+        return false;
+      if (import.kind != hfir::HostImportKind::NativeC &&
+          import.kind != hfir::HostImportKind::NativeSwift &&
+          import.kind != hfir::HostImportKind::NativeCXX) {
+        if (hf_host_adapter_validate(&descriptor) != HFStatusApplied)
+          return false;
+        continue;
+      }
+      HFHostAdapterLease *lease = nullptr;
+      if (hf_host_adapter_acquire(&descriptor, &lease) != HFStatusApplied ||
+          lease == nullptr)
+        return false;
+      try {
+        nativeLeases_.emplace(import.id, lease);
+      } catch (...) {
+        hf_host_adapter_release(lease);
+        throw;
+      }
+    }
+    return true;
+  }
+
+  bool invokeHostImport(const hfir::HostImport &import, void *receiver,
+                        const std::vector<HFValue> &arguments,
+                        VMValue &returned) {
+    std::vector<HFValueKind> argumentKinds;
+    HFHostCallDescriptor descriptor = {};
+    if (!buildHostDescriptor(import, argumentKinds, descriptor))
+      return false;
+
+    HFHandle hostReceiver = HFInvalidHandle();
+    if (import.hasReceiver) {
+      if (receiver == nullptr)
+        return false;
+      hostReceiver.token = static_cast<std::uint64_t>(
+          reinterpret_cast<std::uintptr_t>(receiver));
+      hostReceiver.kind = HFHandleKindObject;
+      hostReceiver.flags = HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress;
+    }
+    HFValue result = HFMakeValue(HFValueKindInvalid, 0);
+    HFStatus status = HFStatusExecutionFailed;
+    if (import.kind == hfir::HostImportKind::NativeC ||
+        import.kind == hfir::HostImportKind::NativeSwift ||
+        import.kind == hfir::HostImportKind::NativeCXX) {
+      const auto lease = nativeLeases_.find(import.id);
+      if (lease == nativeLeases_.end())
+        return false;
+      if ((hf_host_adapter_lease_flags(lease->second) &
+           HFHostCallFlagNoSideEffects) == 0)
+        hostEffectsStarted_ = true;
+      status = hf_host_adapter_invoke_leased(
+          lease->second, hostReceiver,
+          arguments.empty() ? nullptr : arguments.data(),
+          static_cast<std::uint32_t>(arguments.size()), &result);
+    } else {
+      if (import.kind != hfir::HostImportKind::Class)
+        hostEffectsStarted_ = true;
+      status = hf_host_adapter_invoke(
+          &descriptor, hostReceiver,
+          arguments.empty() ? nullptr : arguments.data(),
+          static_cast<std::uint32_t>(arguments.size()), &result);
+    }
+    if (status != HFStatusApplied)
+      return false;
+    if (!unmarshalHostValue(result, import.returnType, returned)) {
+      if (result.kind == HFValueKindHostHandle && result.bits != 0 &&
+          result.flags == HFValueFlagRetainedHostHandle) {
+        IRHFObjCReleaseRetainedObject(reinterpret_cast<void *>(
+            static_cast<std::uintptr_t>(result.bits)));
+      }
       return false;
     }
+    return true;
   }
 
 public:
@@ -653,6 +840,8 @@ public:
 
 private:
   const hfir::Package &package_;
+  std::unordered_map<std::uint64_t, HFHostAdapterLease *> nativeLeases_;
+  bool hostEffectsStarted_ = false;
 };
 
 HFStatus finish(HFPatchFrame *frame, HFStatus status) {
@@ -713,12 +902,22 @@ HFStatus hf_hfir_vm_invoke(HFPatchFrame *frame) {
     return finish(frame, HFStatusSignatureMismatch);
   try {
     Executor executor(patch->package);
-    VMValue result;
-    if (!executor.invoke(*frame, result))
-      return finish(frame, HFStatusExecutionFailed);
-    if (!Executor::encodeResult(result, frame->result))
-      return finish(frame, HFStatusInvalidResult);
-    return finish(frame, HFStatusApplied);
+    try {
+      VMValue result;
+      if (!executor.invoke(*frame, result))
+        return finish(frame, executor.hostEffectsStarted()
+                                 ? HFStatusExecutionCommitted
+                                 : HFStatusExecutionFailed);
+      if (!Executor::encodeResult(result, frame->result))
+        return finish(frame, executor.hostEffectsStarted()
+                                 ? HFStatusExecutionCommitted
+                                 : HFStatusInvalidResult);
+      return finish(frame, HFStatusApplied);
+    } catch (...) {
+      return finish(frame, executor.hostEffectsStarted()
+                               ? HFStatusExecutionCommitted
+                               : HFStatusExecutionFailed);
+    }
   } catch (...) {
     return finish(frame, HFStatusExecutionFailed);
   }

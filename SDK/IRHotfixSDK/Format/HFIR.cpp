@@ -322,6 +322,25 @@ bool verifyInstructionSemantics(const Package &package,
     return verifyCallArguments(import.parameterTypes, import.hasReceiver,
                                instruction, 1, error, path);
   }
+  case Opcode::HostCall: {
+    if (instruction.operands.empty() ||
+        instruction.operands[0].kind != OperandKind::Import)
+      return fail(error, path, "host.call requires a native host import");
+    const HostImport &import = package.imports[instruction.operands[0].index];
+    if (import.kind != HostImportKind::NativeC &&
+        import.kind != HostImportKind::NativeSwift &&
+        import.kind != HostImportKind::NativeCXX)
+      return fail(error, path, "host.call requires a C, Swift, or C++ import");
+    if (import.returnType == ValueType::Void) {
+      if (!requireNoResult(instruction, error, path))
+        return false;
+    } else if (!requireResult(function, instruction, import.returnType, error,
+                              path)) {
+      return false;
+    }
+    return verifyCallArguments(import.parameterTypes, import.hasReceiver,
+                               instruction, 1, error, path);
+  }
   case Opcode::ObjectRelease:
     return requireNoResult(instruction, error, path) &&
            requireOperandKinds(instruction, {OperandKind::Register}, error,
@@ -386,6 +405,9 @@ const char *hostImportKindName(HostImportKind kind) {
   case HostImportKind::Constructor: return "constructor";
   case HostImportKind::Method: return "method";
   case HostImportKind::Service: return "service";
+  case HostImportKind::NativeC: return "native-c";
+  case HostImportKind::NativeSwift: return "native-swift";
+  case HostImportKind::NativeCXX: return "native-cxx";
   }
   return "invalid";
 }
@@ -435,6 +457,7 @@ const char *opcodeName(Opcode opcode) {
   case Opcode::ObjectRelease: return "object.release";
   case Opcode::StringConstant: return "string.constant";
   case Opcode::FunctionCall: return "function.call";
+  case Opcode::HostCall: return "host.call";
   }
   return "invalid";
 }
@@ -498,11 +521,16 @@ bool verify(const Package &package, std::string &error) {
     if (static_cast<std::uint8_t>(import.kind) <
             static_cast<std::uint8_t>(HostImportKind::Class) ||
         static_cast<std::uint8_t>(import.kind) >
-            static_cast<std::uint8_t>(HostImportKind::Service))
+            static_cast<std::uint8_t>(HostImportKind::NativeCXX))
       return fail(error, path + ".kind", "invalid host import kind");
     if (import.name.empty())
       return fail(error, path + ".name", "must not be empty");
-    if (import.kind != HostImportKind::Service && import.owner.empty())
+    if (import.parameterTypes.size() > kMaximumHostArgumentCount)
+      return fail(error, path + ".parameterTypes",
+                  "exceeds maximum host argument count");
+    if ((import.kind == HostImportKind::Class ||
+         import.kind == HostImportKind::Constructor ||
+         import.kind == HostImportKind::Method) && import.owner.empty())
       return fail(error, path + ".owner", "must not be empty");
     if (!verifyType(import.returnType, true, error, path + ".returnType"))
       return false;
@@ -518,6 +546,8 @@ bool verify(const Package &package, std::string &error) {
          !import.parameterTypes.empty())) {
       return fail(error, path, "class import must return a handle without arguments");
     }
+    if (import.kind == HostImportKind::NativeC && import.hasReceiver)
+      return fail(error, path, "native C import cannot have a receiver");
   }
 
   std::set<std::string> functionNames;

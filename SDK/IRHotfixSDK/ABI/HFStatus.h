@@ -14,6 +14,11 @@ enum {
     HFStatusInvalidArguments = 5,
     HFStatusExecutionFailed = 6,
     HFStatusInvalidResult = 7,
+    HFStatusHostAdapterNotFound = 8,
+    HFStatusHostAdapterConflict = 9,
+    /// Host execution may already have produced externally visible effects.
+    /// A trampoline must never fall back to the original implementation.
+    HFStatusExecutionCommitted = 10,
 };
 
 #endif /* HFStatus_h */
