@@ -14,7 +14,7 @@ fail() {
 }
 
 usage() {
-  echo "usage: swift-patch-build --manifest <HotfixTargetManifest.json> --target <query> --source <Patch.swift> --output <Patch.irpatch> [--sdk iphonesimulator|iphoneos] [--arch arm64] [--deployment-target 26.2]" >&2
+  echo "usage: swift-patch-build --manifest <HotfixTargetManifest.json> --target <query> --source <Patch.swift> --output <Patch.irpatch|Patch.hfpatch> [--sdk iphonesimulator|iphoneos] [--arch arm64] [--deployment-target 26.2]" >&2
   exit 64
 }
 

@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 TOOL="$ROOT/Tools/HotfixPass/.build/HotfixPackageTool"
 FORMAT_TESTS="$ROOT/Tools/HotfixPass/.build/HFIRFormatTests"
+VM_TESTS="$ROOT/Tools/HotfixPass/.build/HFIRVMTests"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-hfir-format.XXXXXX")"
 
 cleanup() {
@@ -14,8 +15,10 @@ trap cleanup EXIT
 
 [[ -x "$TOOL" ]] || { echo "error: missing $TOOL" >&2; exit 1; }
 [[ -x "$FORMAT_TESTS" ]] || { echo "error: missing $FORMAT_TESTS" >&2; exit 1; }
+[[ -x "$VM_TESTS" ]] || { echo "error: missing $VM_TESTS" >&2; exit 1; }
 
 "$FORMAT_TESTS"
+"$VM_TESTS"
 "$TOOL" create-example "$TEMP/first.hfpatch"
 "$TOOL" create-example "$TEMP/second.hfpatch"
 cmp "$TEMP/first.hfpatch" "$TEMP/second.hfpatch"

@@ -281,6 +281,8 @@
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixManifestTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPatchTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPackageTool.cpp",
+				"$(SRCROOT)/Tools/HotfixPass/Sources/HFIRLowering.h",
+				"$(SRCROOT)/Tools/HotfixPass/Sources/HFIRLowering.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPass.cpp",
 				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFIR.h",
 				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFIR.cpp",

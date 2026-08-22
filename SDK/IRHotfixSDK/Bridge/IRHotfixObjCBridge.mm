@@ -392,6 +392,51 @@ IRHFObjCInvocationResult IRHFObjCInvoke(
     return readReturnValue(invocation, signature, selectorName);
 }
 
+IRHFObjCInvocationResult IRHFObjCConstruct(
+    void *classObject,
+    const char *initializerName,
+    const IRHFValue *arguments,
+    size_t argumentCount
+) {
+    if (classObject == nullptr || initializerName == nullptr) {
+        return resultWithStatus(IRHFObjCInvocationStatusInvalidInput);
+    }
+    Class objectClass = (__bridge Class)classObject;
+    id allocated = [objectClass alloc];
+    if (allocated == nil) {
+        return resultWithStatus(IRHFObjCInvocationStatusInvocationException);
+    }
+    IRHFObjCInvocationResult result =
+        IRHFObjCInvoke((__bridge void *)allocated, initializerName,
+                       arguments, argumentCount);
+    if (result.status == IRHFObjCInvocationStatusSuccess &&
+        result.value.kind == IRHFValueKindObject && result.value.bits != 0) {
+        void *returned = reinterpret_cast<void *>(
+            static_cast<uintptr_t>(result.value.bits));
+        if (returned == (__bridge void *)allocated) {
+            // The local strong reference owns this alloc/init result. Transfer
+            // one independent retain before ARC releases the local reference.
+            CFRetain(reinterpret_cast<CFTypeRef>(returned));
+        }
+    }
+    return result;
+}
+
+void *IRHFObjCCreateStringUTF8(const void *bytes, size_t byteCount) {
+    if (byteCount != 0 && bytes == nullptr) {
+        return nullptr;
+    }
+    NSString *string = [[NSString alloc]
+        initWithBytes:bytes
+              length:byteCount
+            encoding:NSUTF8StringEncoding];
+    return (__bridge_retained void *)string;
+}
+
+int IRHFObjCIsMainThread(void) {
+    return [NSThread isMainThread] ? 1 : 0;
+}
+
 void *IRHFObjCLookUpClass(const char *className) {
     if (className == nullptr) {
         return nullptr;

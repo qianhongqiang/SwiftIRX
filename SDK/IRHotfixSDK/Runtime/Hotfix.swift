@@ -4,6 +4,11 @@ nonisolated enum HotfixError: Error, Equatable, Sendable {
     case patchNotFound(String)
 }
 
+nonisolated enum HotfixBinaryPatchError: Error, Equatable, Sendable {
+    case installFailed(status: HFStatus)
+    case activationFailed(status: HFStatus)
+}
+
 nonisolated enum HotfixTextPatchError: Error, Equatable, Sendable {
     case expectedSingleFunction(actualCount: Int)
     case unsupportedReturnType(LLVMIRABIValueKind)
@@ -206,6 +211,13 @@ nonisolated struct HotfixActivation: Equatable, Sendable {
     fileprivate let patchID: String
 }
 
+nonisolated struct HotfixBinaryActivation: @unchecked Sendable {
+    fileprivate let handle: HFIRPatchHandle
+
+    var targetID: UInt64 { handle.targetID }
+    var signatureID: UInt64 { handle.signatureID }
+}
+
 private nonisolated struct HotfixState: Codable, Sendable {
     var patchesByID: [String: HotfixPatch]
     var activePatchIDByTarget: [UInt64: String]
@@ -280,6 +292,23 @@ nonisolated final class HotfixManager: @unchecked Sendable {
         return HotfixActivation(targetID: patch.targetID, patchID: patch.id)
     }
 
+    @discardableResult
+    func installAndActivate(binaryPatch data: Data) throws -> HotfixBinaryActivation {
+        var handle = HFIRPatchHandle()
+        let installStatus = data.withUnsafeBytes { bytes in
+            hf_hfir_vm_install(bytes.baseAddress, bytes.count, &handle)
+        }
+        guard installStatus == HFStatus(HFStatusApplied) else {
+            throw HotfixBinaryPatchError.installFailed(status: installStatus)
+        }
+        let activationStatus = hf_hfir_vm_activate(handle)
+        guard activationStatus == HFStatus(HFStatusApplied) else {
+            _ = hf_hfir_vm_uninstall(handle)
+            throw HotfixBinaryPatchError.activationFailed(status: activationStatus)
+        }
+        return HotfixBinaryActivation(handle: handle)
+    }
+
     func deactivate(_ activation: HotfixActivation) {
         lock.lock()
         defer { lock.unlock() }
@@ -290,6 +319,11 @@ nonisolated final class HotfixManager: @unchecked Sendable {
         var candidate = state
         candidate.activePatchIDByTarget.removeValue(forKey: activation.targetID)
         publish(candidate)
+    }
+
+    func deactivate(_ activation: HotfixBinaryActivation) {
+        _ = hf_hfir_vm_deactivate(activation.handle)
+        _ = hf_hfir_vm_uninstall(activation.handle)
     }
 
     func deactivatePatch(for targetID: UInt64) {
@@ -601,6 +635,11 @@ nonisolated func hf_vm_invoke(
 ) -> HFStatus {
     guard let framePointer else {
         return HFStatus(HFStatusInvalidFrame)
+    }
+
+    let binaryStatus = hf_hfir_vm_invoke(framePointer)
+    guard binaryStatus == HFStatus(HFStatusNoPatch) else {
+        return binaryStatus
     }
 
     var frame = framePointer.pointee

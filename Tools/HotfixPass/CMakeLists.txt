@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(HotfixPass LANGUAGES C CXX)
+project(HotfixPass LANGUAGES C CXX OBJCXX)
 
 find_package(
   LLVM 19.1.7 EXACT REQUIRED CONFIG
@@ -27,7 +27,11 @@ target_include_directories(
 )
 target_link_libraries(HotfixManifestTool PRIVATE LLVM)
 
-add_executable(HotfixPatchTool Sources/HotfixPatchTool.cpp)
+add_executable(
+  HotfixPatchTool
+  Sources/HotfixPatchTool.cpp
+  Sources/HFIRLowering.cpp
+)
 target_compile_features(HotfixPatchTool PRIVATE cxx_std_20)
 target_include_directories(HotfixPatchTool SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_include_directories(
@@ -46,6 +50,7 @@ target_include_directories(
   IRHotfixFormat
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/Format"
 )
+target_link_libraries(HotfixPatchTool PRIVATE IRHotfixFormat)
 
 add_executable(HotfixPackageTool Sources/HotfixPackageTool.cpp)
 target_compile_features(HotfixPackageTool PRIVATE cxx_std_20)
@@ -54,6 +59,28 @@ target_link_libraries(HotfixPackageTool PRIVATE IRHotfixFormat)
 add_executable(HFIRFormatTests Tests/HFIRFormatTests.cpp)
 target_compile_features(HFIRFormatTests PRIVATE cxx_std_20)
 target_link_libraries(HFIRFormatTests PRIVATE IRHotfixFormat)
+
+if(APPLE)
+  add_executable(
+    HFIRVMTests
+    Tests/HFIRVMTests.cpp
+    ../../SDK/IRHotfixSDK/VM/HFIRRuntime.cpp
+    ../../SDK/IRHotfixSDK/Bridge/IRHotfixObjCBridge.mm
+  )
+  target_compile_features(HFIRVMTests PRIVATE cxx_std_20)
+  target_compile_options(
+    HFIRVMTests
+    PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
+  )
+  target_include_directories(
+    HFIRVMTests
+    PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/VM"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/Bridge"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+  )
+  target_link_libraries(HFIRVMTests PRIVATE IRHotfixFormat "-framework Foundation")
+endif()
 
 set(
   HOTFIX_PASS_OUTPUT_DIRECTORY
@@ -93,6 +120,14 @@ set_target_properties(
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
 )
+
+if(APPLE)
+  set_target_properties(
+    HFIRVMTests
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+  )
+endif()
 
 if(APPLE)
   target_link_options(HotfixPass PRIVATE "LINKER:-undefined,dynamic_lookup")

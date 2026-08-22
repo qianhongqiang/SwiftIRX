@@ -26,6 +26,8 @@ ValueType constantType(ConstantKind kind) {
     return ValueType::Size;
   case ConstantKind::Rect:
     return ValueType::Rect;
+  case ConstantKind::NullHandle:
+    return ValueType::Handle;
   }
   return ValueType::Void;
 }
@@ -198,6 +200,19 @@ bool verifyInstructionSemantics(const Package &package,
            requireOperandKinds(instruction, {OperandKind::Register}, error, path) &&
            (instruction.resultType == instruction.operands[0].type ||
             fail(error, path, "move source and result types differ"));
+  case Opcode::Phi:
+    if (!requireResult(function, instruction, ValueType::Void, error, path) ||
+        instruction.operands.empty() || instruction.operands.size() % 2 != 0)
+      return fail(error, path,
+                  "phi requires register/block operand pairs and a result");
+    for (std::size_t index = 0; index < instruction.operands.size(); index += 2) {
+      if (instruction.operands[index].kind != OperandKind::Register ||
+          instruction.operands[index].type != instruction.resultType ||
+          instruction.operands[index + 1].kind != OperandKind::Block)
+        return fail(error, path,
+                    "phi incoming value or predecessor has an invalid type");
+    }
+    return true;
   case Opcode::AddI64:
   case Opcode::SubI64:
   case Opcode::MulI64:
@@ -220,7 +235,11 @@ bool verifyInstructionSemantics(const Package &package,
                              error, path))
       return false;
     return instruction.operands[0].type == instruction.operands[1].type &&
-                   isScalarArithmeticType(instruction.operands[0].type)
+                   (isScalarArithmeticType(instruction.operands[0].type) ||
+                    instruction.operands[0].type == ValueType::Bool ||
+                    ((instruction.opcode == Opcode::CompareEqual ||
+                      instruction.opcode == Opcode::CompareNotEqual) &&
+                     instruction.operands[0].type == ValueType::Handle))
                ? true
                : fail(error, path,
                       "comparison requires two equal scalar operand types");
@@ -244,6 +263,9 @@ bool verifyInstructionSemantics(const Package &package,
                                path) &&
            (instruction.operands[0].type == function.returnType ||
             fail(error, path, "return operand type does not match function"));
+  case Opcode::Trap:
+    return requireNoResult(instruction, error, path) &&
+           requireOperandKinds(instruction, {}, error, path);
   case Opcode::LocalAllocate:
     return requireNoResult(instruction, error, path) &&
            requireOperandKinds(instruction, {OperandKind::Local}, error, path);
@@ -353,6 +375,7 @@ const char *constantKindName(ConstantKind kind) {
   case ConstantKind::Point: return "point";
   case ConstantKind::Size: return "size";
   case ConstantKind::Rect: return "rect";
+  case ConstantKind::NullHandle: return "null-handle";
   }
   return "invalid";
 }
@@ -384,6 +407,7 @@ const char *opcodeName(Opcode opcode) {
   case Opcode::Nop: return "nop";
   case Opcode::Constant: return "const";
   case Opcode::Move: return "move";
+  case Opcode::Phi: return "phi";
   case Opcode::AddI64: return "add.i64";
   case Opcode::SubI64: return "sub.i64";
   case Opcode::MulI64: return "mul.i64";
@@ -401,6 +425,7 @@ const char *opcodeName(Opcode opcode) {
   case Opcode::Branch: return "branch";
   case Opcode::ConditionalBranch: return "branch.conditional";
   case Opcode::Return: return "return";
+  case Opcode::Trap: return "trap";
   case Opcode::LocalAllocate: return "local.alloc";
   case Opcode::LocalLoad: return "local.load";
   case Opcode::LocalStore: return "local.store";
@@ -421,7 +446,7 @@ bool isValidValueType(ValueType type) {
 
 bool isTerminator(Opcode opcode) {
   return opcode == Opcode::Branch || opcode == Opcode::ConditionalBranch ||
-         opcode == Opcode::Return;
+         opcode == Opcode::Return || opcode == Opcode::Trap;
 }
 
 bool verify(const Package &package, std::string &error) {
@@ -451,6 +476,9 @@ bool verify(const Package &package, std::string &error) {
       return fail(error, path + ".bytes", "scalar constants cannot contain bytes");
     if (constant.kind == ConstantKind::Bool && constant.bits > 1)
       return fail(error, path + ".bits", "bool constant must be zero or one");
+    if (constant.kind == ConstantKind::NullHandle &&
+        (constant.bits != 0 || !constant.bytes.empty()))
+      return fail(error, path, "null handle constant must have an empty payload");
     const std::size_t requiredAggregateSize =
         constant.kind == ConstantKind::Point || constant.kind == ConstantKind::Size
             ? 16
@@ -558,6 +586,10 @@ bool verify(const Package &package, std::string &error) {
         const Instruction &instruction = block.instructions[instructionIndex];
         const std::string instructionPath =
             blockPath + ".instructions[" + std::to_string(instructionIndex) + "]";
+        if (instruction.opcode == Opcode::Phi && instructionIndex != 0 &&
+            block.instructions[instructionIndex - 1].opcode != Opcode::Phi)
+          return fail(error, instructionPath,
+                      "phi instructions must form the basic block prefix");
         for (std::size_t operandIndex = 0;
              operandIndex < instruction.operands.size(); ++operandIndex) {
           if (!verifyOperandReference(
@@ -608,6 +640,32 @@ bool verify(const Package &package, std::string &error) {
       }
       for (std::size_t successor : successors[index])
         predecessors[successor].push_back(index);
+    }
+
+    for (std::size_t blockIndex = 0; blockIndex < function.blocks.size();
+         ++blockIndex) {
+      const BasicBlock &block = function.blocks[blockIndex];
+      for (std::size_t instructionIndex = 0;
+           instructionIndex < block.instructions.size(); ++instructionIndex) {
+        const Instruction &instruction = block.instructions[instructionIndex];
+        if (instruction.opcode != Opcode::Phi)
+          break;
+        for (std::size_t operandIndex = 1;
+             operandIndex < instruction.operands.size(); operandIndex += 2) {
+          const std::size_t incomingBlock =
+              blockIndexByID.at(instruction.operands[operandIndex].index);
+          if (std::find(predecessors[blockIndex].begin(),
+                        predecessors[blockIndex].end(), incomingBlock) ==
+              predecessors[blockIndex].end()) {
+            return fail(error,
+                        functionPath + ".blocks[" +
+                            std::to_string(blockIndex) + "].instructions[" +
+                            std::to_string(instructionIndex) + "].operands[" +
+                            std::to_string(operandIndex) + "]",
+                        "phi incoming block is not a CFG predecessor");
+          }
+        }
+      }
     }
 
     std::vector<bool> reachable(function.blocks.size(), false);
@@ -671,10 +729,18 @@ bool verify(const Package &package, std::string &error) {
               operand.index < function.parameterTypes.size())
             continue;
           const std::size_t definingBlock = definitionBlock[operand.index];
-          const bool dominates =
-              definingBlock == blockIndex
-                  ? definitionInstruction[operand.index] < instructionIndex
-                  : dominators[blockIndex].contains(definingBlock);
+          bool dominates = false;
+          if (instruction.opcode == Opcode::Phi && operandIndex % 2 == 0) {
+            const std::size_t predecessor = blockIndexByID.at(
+                instruction.operands[operandIndex + 1].index);
+            dominates = definingBlock == predecessor ||
+                        dominators[predecessor].contains(definingBlock);
+          } else {
+            dominates = definingBlock == blockIndex
+                            ? definitionInstruction[operand.index] <
+                                  instructionIndex
+                            : dominators[blockIndex].contains(definingBlock);
+          }
           if (!dominates) {
             return fail(error,
                         functionPath + ".blocks[" +

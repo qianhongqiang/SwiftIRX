@@ -4,3 +4,4 @@
 
 #include "../ABI/IRHotfixABI.h"
 #include "../Bridge/IRHotfixObjCBridge.h"
+#include "../VM/HFIRRuntime.h"

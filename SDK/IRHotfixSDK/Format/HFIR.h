@@ -34,6 +34,7 @@ enum class ConstantKind : std::uint8_t {
   Point = 6,
   Size = 7,
   Rect = 8,
+  NullHandle = 9,
 };
 
 enum class HostImportKind : std::uint8_t {
@@ -56,6 +57,7 @@ enum class Opcode : std::uint16_t {
   Nop = 0,
   Constant = 1,
   Move = 2,
+  Phi = 3,
 
   AddI64 = 10,
   SubI64 = 11,
@@ -76,6 +78,7 @@ enum class Opcode : std::uint16_t {
   Branch = 30,
   ConditionalBranch = 31,
   Return = 32,
+  Trap = 33,
 
   LocalAllocate = 40,
   LocalLoad = 41,

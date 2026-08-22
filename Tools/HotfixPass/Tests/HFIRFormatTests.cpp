@@ -56,6 +56,51 @@ hfir::Package makePackage() {
   return package;
 }
 
+hfir::Package makePhiPackage(bool invalidPredecessor) {
+  using namespace hfir;
+  Package package;
+  package.abiVersion = 1;
+  package.patchID = "test.phi";
+  package.target = {3, 4, 0};
+  package.constants = {{ConstantKind::I64, 10, {}},
+                       {ConstantKind::I64, 20, {}}};
+  Function function;
+  function.name = "choose";
+  function.returnType = ValueType::I64;
+  function.parameterTypes = {ValueType::Bool};
+  function.registerTypes = {ValueType::Bool, ValueType::I64, ValueType::I64,
+                            ValueType::I64};
+  function.entryBlock = 0;
+  function.blocks = {
+      {0,
+       {{Opcode::ConditionalBranch, kNoRegister, ValueType::Void,
+         {{OperandKind::Register, ValueType::Bool, 0},
+          {OperandKind::Block, ValueType::Void, 1},
+          {OperandKind::Block, ValueType::Void, 2}}}}},
+      {1,
+       {{Opcode::Constant, 1, ValueType::I64,
+         {{OperandKind::Constant, ValueType::I64, 0}}},
+        {Opcode::Branch, kNoRegister, ValueType::Void,
+         {{OperandKind::Block, ValueType::Void, 3}}}}},
+      {2,
+       {{Opcode::Constant, 2, ValueType::I64,
+         {{OperandKind::Constant, ValueType::I64, 1}}},
+        {Opcode::Branch, kNoRegister, ValueType::Void,
+         {{OperandKind::Block, ValueType::Void, 3}}}}},
+      {3,
+       {{Opcode::Phi, 3, ValueType::I64,
+         {{OperandKind::Register, ValueType::I64, 1},
+          {OperandKind::Block, ValueType::Void, 1},
+          {OperandKind::Register, ValueType::I64, 2},
+          {OperandKind::Block, ValueType::Void,
+           invalidPredecessor ? 0u : 2u}}},
+        {Opcode::Return, kNoRegister, ValueType::Void,
+         {{OperandKind::Register, ValueType::I64, 3}}}}},
+  };
+  package.functions = {std::move(function)};
+  return package;
+}
+
 } // namespace
 
 int main() {
@@ -96,6 +141,12 @@ int main() {
   require(!hfir::verify(useBeforeDefinition, error) &&
               error.find("does not dominate") != std::string::npos,
           "use-before-definition was accepted");
+
+  require(hfir::verify(makePhiPackage(false), error),
+          "valid phi package was rejected: " + error);
+  require(!hfir::verify(makePhiPackage(true), error) &&
+              error.find("not a CFG predecessor") != std::string::npos,
+          "phi accepted an incoming non-predecessor block");
 
   std::vector<std::uint8_t> corrupted = first;
   corrupted[80] ^= 0x01;

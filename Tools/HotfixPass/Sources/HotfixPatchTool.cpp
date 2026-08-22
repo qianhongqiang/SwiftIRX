@@ -1,4 +1,6 @@
 #include "IRHotfixABI.h"
+#include "HFIRLowering.h"
+#include "HFPatchContainer.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
@@ -348,6 +350,18 @@ bool writePatch(Function &entry, StringRef outputPath, std::string &error) {
   return true;
 }
 
+bool writeHFPatch(Module &module, Function &entry, const Target &target,
+                  StringRef outputPath, std::string &error) {
+  irhotfix::hfir::Package package;
+  if (!irhotfix::lowering::lowerFunction(
+          module, entry, target.targetID, target.signatureID, package, error))
+    return false;
+  std::vector<std::uint8_t> bytes;
+  if (!irhotfix::container::encode(package, bytes, error))
+    return false;
+  return irhotfix::container::writeFile(outputPath.str(), bytes, error);
+}
+
 bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
                 StringRef outputPath, std::string &error) {
   Target target;
@@ -384,7 +398,36 @@ bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
   }
 
   entry->setName(target.symbol);
+  if (outputPath.contains(".hfpatch"))
+    return writeHFPatch(*module, *entry, target, outputPath, error);
   return writePatch(*entry, outputPath, error);
+}
+
+bool lowerHFPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
+                  StringRef outputPath, std::string &error) {
+  Target target;
+  if (!loadTarget(manifestPath, query, target, error))
+    return false;
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  std::unique_ptr<Module> module = parseIRFile(inputPath, diagnostic, context);
+  if (module == nullptr) {
+    std::string message;
+    raw_string_ostream stream(message);
+    diagnostic.print("HotfixPatchTool", stream);
+    stream.flush();
+    error = "cannot read LLVM patch '" + inputPath.str() + "': " + message;
+    return false;
+  }
+  Function *entry = module->getFunction(target.symbol);
+  if (entry == nullptr) {
+    error = "LLVM patch does not define baseline target '" + target.symbol + "'";
+    return false;
+  }
+  if (!validateEntry(*entry, target, error) ||
+      !lowerCheckedIntegerArithmetic(*entry, error))
+    return false;
+  return writeHFPatch(*module, *entry, target, outputPath, error);
 }
 
 bool extractAnnotatedPatches(StringRef manifestPath, StringRef inputPath,
@@ -461,6 +504,12 @@ bool extractAnnotatedPatches(StringRef manifestPath, StringRef inputPath,
                       "0x" + utohexstr(target.targetID, true, 16) + ".irpatch");
     if (!writePatch(*targetFunction, outputPath, error))
       return false;
+
+    SmallString<256> packagePath(outputDirectory);
+    sys::path::append(packagePath,
+                      "0x" + utohexstr(target.targetID, true, 16) + ".hfpatch");
+    if (!writeHFPatch(*module, *targetFunction, target, packagePath, error))
+      return false;
   }
   return true;
 }
@@ -484,10 +533,18 @@ int main(int argc, char **argv) {
       return fail(error);
     return 0;
   }
+  if (argc == 6 && StringRef(argv[1]) == "lower-hfir") {
+    std::string error;
+    if (!lowerHFPatch(argv[2], argv[3], argv[4], argv[5], error))
+      return fail(error);
+    return 0;
+  }
   {
     return fail("usage: HotfixPatchTool build <manifest.json> <target-query> "
-                "<swift.bc|swift.ll> <output.irpatch>\n"
+                "<swift.bc|swift.ll> <output.irpatch|output.hfpatch>\n"
                 "       HotfixPatchTool extract-annotated <manifest.json> "
-                "<swift.bc|swift.ll> <output-directory>");
+                "<swift.bc|swift.ll> <output-directory>\n"
+                "       HotfixPatchTool lower-hfir <manifest.json> "
+                "<target-query> <input.irpatch|swift.ll> <output.hfpatch>");
   }
 }

@@ -371,7 +371,7 @@ if [[ "$patch_mode" == "1" ]]; then
     "$temp/input.bc" \
     "$atomic_patch_directory"
   if grep -Eq '@HotfixPatch([[:space:](]|$)' "$primary_file" &&
-    ! find "$atomic_patch_directory" -type f -name '*.irpatch' -print -quit |
+    ! find "$atomic_patch_directory" -type f -name '*.hfpatch' -print -quit |
       grep -q .; then
     fail "@HotfixPatch in $primary_file produced no annotation anchor"
   fi

@@ -36,6 +36,21 @@ IRHFObjCInvocationResult IRHFObjCInvoke(
     size_t argumentCount
 );
 
+/// Allocates an Objective-C instance and invokes its initializer. The returned
+/// object follows the same +1 ownership contract as IRHFObjCInvoke results.
+IRHFObjCInvocationResult IRHFObjCConstruct(
+    void *classObject,
+    const char *initializerName,
+    const IRHFValue *arguments,
+    size_t argumentCount
+);
+
+/// Creates an NSString from UTF-8 bytes and returns it at +1 ownership.
+void *IRHFObjCCreateStringUTF8(const void *bytes, size_t byteCount);
+
+/// Returns nonzero when the caller is running on the process main thread.
+int IRHFObjCIsMainThread(void);
+
 void *IRHFObjCLookUpClass(const char *className);
 
 void *IRHFObjCRegisterSelector(const char *selectorName);

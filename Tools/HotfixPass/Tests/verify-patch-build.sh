@@ -10,6 +10,7 @@ ANNOTATION="$ROOT/SDK/IRHotfixSDK/Runtime/HotfixPatchAnnotation.swift"
 SWIFT="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
 SWIFTC="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
 MANIFEST="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest.json"
+SETUP_UI_MANIFEST="$ROOT/Tools/HotfixPass/Tests/fixtures/setup_ui_manifest.json"
 FIXTURES="$ROOT/Tools/HotfixPass/Tests/fixtures"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-patch-build-tests.XXXXXX")"
 
@@ -43,6 +44,40 @@ fi
   --source "$FIXTURES/patch_receiver.swift" \
   --output "$TEMP/receiver.irpatch"
 grep -Fq 'define dso_local swiftcc i64 @instanceTarget(ptr' "$TEMP/receiver.irpatch"
+
+"$BUILDER" \
+  --manifest "$MANIFEST" \
+  --target integerTarget \
+  --source "$FIXTURES/patch_integer.swift" \
+  --output "$TEMP/integer.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify "$TEMP/integer.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/integer.hfpatch" >"$TEMP/integer.hfir.txt"
+grep -Fq 'add.i64' "$TEMP/integer.hfir.txt"
+if grep -Eq '(^|[^[:alpha:]])(define|declare|llvm\.)|\$s[0-9]' "$TEMP/integer.hfir.txt"; then
+  echo "error: lowered integer patch leaked compiler IR" >&2
+  exit 1
+fi
+
+"$BUILDER" \
+  --manifest "$SETUP_UI_MANIFEST" \
+  --target setupUI \
+  --source "$FIXTURES/patch_setup_ui.swift" \
+  --output "$TEMP/setup-ui.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify "$TEMP/setup-ui.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/setup-ui.hfpatch" >"$TEMP/setup-ui.hfir.txt"
+grep -Fq 'object.construct' "$TEMP/setup-ui.hfir.txt"
+grep -Fq 'object.invoke' "$TEMP/setup-ui.hfir.txt"
+grep -Fq 'UILabel.setText:' "$TEMP/setup-ui.hfir.txt"
+if [[ "$(grep -Fc '"hello"' "$TEMP/setup-ui.hfir.txt")" != "1" ]]; then
+  echo "error: Swift string literal was materialized more than once" >&2
+  exit 1
+fi
+if grep -Eq '(^|[^[:alpha:]])(define|declare|llvm\.)|\$s[0-9]' "$TEMP/setup-ui.hfir.txt"; then
+  echo "error: lowered UIKit patch leaked compiler IR" >&2
+  exit 1
+fi
 
 if "$BUILDER" \
   --manifest "$MANIFEST" \
@@ -117,7 +152,9 @@ mkdir "$TEMP/annotated-output"
   "$TEMP/annotated.bc" \
   "$TEMP/annotated-output"
 annotated_patch="$TEMP/annotated-output/0x37465577a37332e8.irpatch"
+annotated_binary_patch="$TEMP/annotated-output/0x37465577a37332e8.hfpatch"
 test -f "$annotated_patch"
+test -f "$annotated_binary_patch"
 grep -Fq 'define dso_local swiftcc i64 @integerTarget(i64' "$annotated_patch"
 grep -Fq 'add i64' "$annotated_patch"
 grep -Fq ', 23' "$annotated_patch"
@@ -125,5 +162,6 @@ if grep -Fq '__ir_hotfix_patch_anchor_' "$annotated_patch"; then
   echo "error: generated Patch contains the macro anchor" >&2
   exit 1
 fi
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify "$annotated_binary_patch"
 
 echo "[HotfixPatchTests] all checks passed"

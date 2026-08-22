@@ -116,7 +116,7 @@ while IFS= read -r -d '' patch; do
 done < <(
   find "$temp/DerivedData" \
     -type f \
-    -path '*.hotfix-patches/*.irpatch' \
+    \( -path '*.hotfix-patches/*.irpatch' -o -path '*.hotfix-patches/*.hfpatch' \) \
     -print0
 )
 

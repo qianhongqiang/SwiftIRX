@@ -25,6 +25,9 @@ IRHotfixSDK/
 │   ├── IRHotfixObjCBridge.h
 │   ├── IRHotfixObjCBridge.mm
 │   └── IRHotfixValue.h
+├── VM/
+│   ├── HFIRRuntime.h
+│   └── HFIRRuntime.cpp
 └── Support/
     └── IRHotfix-Bridging-Header.h
 ```
@@ -33,17 +36,19 @@ IRHotfixSDK/
   trampolines, the VM gateway, and future native adapters. `HFPatchFrame` is
   the sole invocation envelope; its embedded `HFHandle` and `HFValue` fields
   do not expose Swift or Objective-C object layouts.
-- `Runtime/Hotfix.swift` contains the patch registry, execution entry points,
-  fallback behavior, the `hf_vm_invoke(HFPatchFrame *)` implementation, and
-  the Codable Target Manifest model.
+- `Runtime/Hotfix.swift` contains the text-patch compatibility registry, binary
+  patch lifecycle API, fallback gateway, and Codable Target Manifest model.
 - `Runtime/HotfixPatchAnnotation.swift` declares the build-only
   `@HotfixPatch` marker used to select changed functions on a patch branch.
 - `Runtime/LLVMIRInterpreter.swift` parses and executes the supported LLVM IR
   subset and owns structured host handles for objects, selectors, and classes.
 - `Format/` defines typed HFIR v1, the deterministic `.hfpatch` v1 container,
   semantic validation, binary encoding/decoding, and human-readable dumping.
-  It is C++20 with no LLVM dependency so the same code can run in host tools
-  and the future iOS VM.
+  It is C++20 with no LLVM dependency so the same code runs in host tools and
+  the iOS VM.
+- `VM/HFIRRuntime.cpp` owns the validated HFIR registry and C++20 interpreter.
+  It executes typed registers, locals, control flow, calls, strings, and
+  descriptor-driven Objective-C operations with instruction/call-depth limits.
 - `Bridge/IRHotfixObjCBridge.h` exposes a stable C ABI to Swift and future VM
   cores.
 - `Bridge/IRHotfixObjCBridge.mm` resolves Objective-C method signatures at
@@ -113,6 +118,7 @@ SDK derives all other metadata:
 
 Supported patch ABI types are `i64`, `i1`, and `void`; a leading `ptr` is the
 optional receiver. The demo payloads under `IR/Patches` are complete examples.
+New patches should use the binary `.hfpatch` workflow below.
 
 ## Build a patch from a release branch
 
@@ -147,7 +153,23 @@ wrapper resolves the anchor to the modified function's exact mangled symbol,
 requires that symbol and ABI to exist in the baseline Manifest, and writes one
 `0x<targetID>.irpatch` file per selected function. A renamed function, a newly
 added function, or an ABI-changing edit fails instead of silently producing an
-unusable Patch.
+unusable Patch. It emits both the compatibility `0x<targetID>.irpatch` and the
+publishable `0x<targetID>.hfpatch`. The binary artifact contains typed HFIR,
+Target and Host Import descriptors, constants, and integrity metadata; it
+contains no LLVM IR or Swift mangled symbol.
+
+Install the binary payload through the SDK lifecycle API:
+
+```swift
+let data = try Data(contentsOf: patchURL)
+let activation = try HotfixManager.shared.installAndActivate(binaryPatch: data)
+defer { HotfixManager.shared.deactivate(activation) }
+```
+
+`hf_vm_invoke` tries the active HFIR VM first and uses the legacy text engine
+only when the HFIR registry returns `HFStatusNoPatch`. Malformed frames,
+signature mismatches, verifier failures, traps, unsupported host types, and
+off-main-thread Objective-C execution all preserve native fallback.
 
 `@HotfixPatch` is intentionally available only while `build-patches` sets
 `IR_HOTFIX_PATCH_BUILD`. The first version accepts non-generic, synchronous,

@@ -977,6 +977,43 @@ struct IRTests {
         #expect(viewController.view.subviews.first?.backgroundColor == UIColor.red)
     }
 
+    @MainActor
+    @Test func installSetupUIFromBundledBinaryPatch() throws {
+        guard let patchURL = Bundle.main.url(forResource: "HotfixSetupUI", withExtension: "hfpatch") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let manager = HotfixManager(
+            userDefaults: UserDefaults(suiteName: "ir.hotfix.binary.tests.\(UUID().uuidString)")!,
+            storageKey: "state"
+        )
+        let activation = try manager.installAndActivate(binaryPatch: Data(contentsOf: patchURL))
+        defer { manager.deactivate(activation) }
+
+        let viewController = UIViewController()
+        _ = viewController.view
+        var frame = HFPatchFrame()
+        frame.abiVersion = HotfixABI.version
+        frame.structSize = UInt32(MemoryLayout<HFPatchFrame>.size)
+        frame.targetID = 0x1232093bb65a3a2b
+        frame.signatureID = 0x988cc6a5a1ee0058
+        frame.flags = HotfixABI.hasReceiverFlag
+        frame.receiver.token = UInt64(UInt(bitPattern: Unmanaged.passUnretained(viewController).toOpaque()))
+        frame.receiver.generation = 0
+        frame.receiver.kind = HotfixABI.objectHandleKind
+        frame.receiver.flags = HotfixABI.borrowedHandleFlags
+        frame.result.kind = HotfixABI.invalidKind
+        frame.status = HFStatus(HFStatusInvalidFrame)
+
+        #expect(hf_vm_invoke(&frame) == HFStatus(HFStatusApplied))
+        #expect(frame.result.kind == HotfixABI.voidKind)
+        let patchedView = try #require(viewController.view.subviews.first)
+        #expect(patchedView.frame == CGRect(x: 100, y: 100, width: 100, height: 100))
+        #expect(patchedView.backgroundColor == UIColor.yellow)
+        let label = try #require(patchedView.subviews.first as? UILabel)
+        #expect(label.frame == CGRect(x: 10, y: 10, width: 80, height: 20))
+        #expect(label.text == "hello")
+    }
+
     @Test func hotfixExecutorUsesActivePatch() throws {
         let userDefaults = UserDefaults(suiteName: "ir.hotfix.tests.\(UUID().uuidString)")!
         let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")

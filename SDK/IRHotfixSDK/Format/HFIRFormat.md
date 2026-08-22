@@ -26,10 +26,10 @@ descriptor requests it. Geometry constants use canonical little-endian IEEE
 The v1 instruction families are:
 
 ```text
-nop const move
+nop const move phi
 add/sub/mul/div .i64 and .f64
 compare.eq/ne/lt/le/gt/ge
-branch branch.conditional return
+branch branch.conditional return trap
 local.alloc local.load local.store
 object.class object.construct object.invoke object.release
 string.constant function.call

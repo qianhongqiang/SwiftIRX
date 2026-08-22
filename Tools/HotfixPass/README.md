@@ -21,8 +21,9 @@ Swift source
 
 Swift patch source + app Target Manifest
   -> Apple Swift 6.2.4 swiftc -emit-bc
-  -> HotfixPatchTool ABI validation and single-function extraction
-  -> .irpatch text artifact
+  -> HotfixPatchTool exact ABI validation
+  -> LLVM-to-HFIR semantic lowering
+  -> deterministic .hfpatch v1 artifact
 
 HFIR package model
   -> IRHotfixFormat semantic verifier
@@ -32,8 +33,8 @@ HFIR package model
 Released source branch + edited @HotfixPatch function + released Target Manifest
   -> Xcode build with the application's original compiler settings
   -> IRHotfixMacrosPlugin annotation anchors
-  -> HotfixPatchTool exact-symbol/ABI validation and function extraction
-  -> one 0x<targetID>.irpatch per annotated function
+  -> HotfixPatchTool exact-symbol/ABI validation and HFIR lowering
+  -> one 0x<targetID>.hfpatch per annotated function
 ```
 
 Do not pass `libHotfixPass.dylib` to Apple `swift-frontend` with
@@ -99,10 +100,13 @@ links two transformed modules, and exports their combined targets.
 execution, response files, section/symbol presence, and default source
 exclusion. `verify-patch-build.sh` compiles Swift patch sources and checks target
 selection, receiver and scalar ABI validation, ambiguous queries, local helper
-rejection, and single-function output.
+rejection, annotation extraction, semantic HFIR lowering, and UIKit/Objective-C
+imports without leaking compiler symbols.
 `verify-hfpatch-format.sh` checks HFIR semantic rejection, deterministic binary
 round-tripping, optional sections, dump output, corruption detection, and the
 absence of LLVM IR and Swift mangled symbols from the published container.
+It also executes the C++20 VM against arithmetic and descriptor-driven
+Objective-C packages.
 
 ## Patch-branch extraction
 
@@ -129,8 +133,10 @@ The generated macro peer calls the annotated original function solely to make
 the compiler-emitted relationship explicit. `HotfixPatchTool
 extract-annotated` follows that anchor, selects the real modified definition,
 requires an exact baseline symbol match, validates the published descriptor,
-and outputs only that definition. It does not infer a target from source names
-or select a near match.
+and publishes the semantic `.hfpatch`. A compatibility `.irpatch` is emitted
+alongside it during the transition. The lowerer rejects unknown LLVM
+instructions and calls with the exact offending instruction; it never
+substitutes a guessed value.
 
 The older `swift-patch-build` command remains useful for low-level extractor
 fixtures that define a separate `func hotfixPatch(...)`; it is not the primary

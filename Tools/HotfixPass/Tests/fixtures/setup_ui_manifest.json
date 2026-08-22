@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "abiVersion": 1,
+  "targets": [
+    {
+      "symbol": "$s2IR14ViewControllerC7setupUI33_7B2304FAFD7CFEBD5E611A21DD4D9FE6LLyyF",
+      "targetID": "0x1232093bb65a3a2b",
+      "signatureID": "0x988cc6a5a1ee0058",
+      "returnKind": "void",
+      "argumentKinds": [],
+      "hasReceiver": true
+    }
+  ]
+}
