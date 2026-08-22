@@ -660,7 +660,7 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                     "Function @\(functionName) returned void, expected value."
                 )
             }
-            guard unwrapped.matches(type: expectedType) else {
+            guard unwrapped.matchesCallReturn(type: expectedType) else {
                 throw LLVMIRInterpreterError.runtime(
                     "Call result type mismatch for function @\(functionName)."
                 )
@@ -684,7 +684,8 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         if functionName.hasPrefix("llvm.memset.") ||
             functionName.hasPrefix("llvm.lifetime.start") ||
             functionName.hasPrefix("llvm.lifetime.end") ||
-            functionName == "llvm.objc.release" {
+            functionName == "llvm.objc.release" ||
+            functionName == "swift_bridgeObjectRelease" {
             return .some(nil)
         }
 
@@ -697,12 +698,39 @@ nonisolated final class LLVMIRInterpreter: Sendable {
             return .some(first)
         }
 
-        if functionName.contains("$sSo6UIViewCMa") {
-            return .some(try state.classReference(named: "UIView"))
+        if let importedClass = importedObjectiveCClassDescriptor(functionName) {
+            if importedClass.member == "CMa" {
+                return .some(try state.classReference(named: importedClass.name))
+            }
+            if importedClass.member == "C5frameABSo6CGRectV_tcfC" {
+                return .some(try makeUIViewSubclassFromFrameCall(
+                    className: importedClass.name,
+                    arguments: arguments,
+                    state: state
+                ))
+            }
         }
 
-        if functionName.contains("$sSo6UIViewC5frameABSo6CGRectV_tcfC") {
-            return .some(try makeUIViewFromFrameCall(arguments: arguments, state: state))
+        if functionName.contains("$sSS21_builtinStringLiteral17utf8CodeUnitCount7isASCII") {
+            guard let literalPointer = arguments.first else {
+                throw LLVMIRInterpreterError.runtime("Swift string literal bridge expects a global pointer.")
+            }
+            let literal = try state.swiftStringLiteral(for: literalPointer)
+            let object = literal as NSString
+            return .some(.aggregate([
+                .int(literal.utf8.count),
+                .hostHandle(state.registerObject(object))
+            ]))
+        }
+
+        if functionName.contains("$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF") {
+            guard arguments.count >= 2,
+                  let object = state.object(for: arguments[1]) as? NSString else {
+                throw LLVMIRInterpreterError.runtime(
+                    "String-to-NSString bridge expects a structured Swift string handle."
+                )
+            }
+            return .some(.hostHandle(state.registerObject(object)))
         }
 
         if functionName == "objc_msgSendSuper2" {
@@ -729,17 +757,53 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         }
     }
 
-    private func makeUIViewFromFrameCall(arguments: [LLVMValue], state: LLVMRuntimeState) throws -> LLVMValue {
+    private func importedObjectiveCClassDescriptor(
+        _ functionName: String
+    ) -> (name: String, member: String)? {
+        guard functionName.hasPrefix("$sSo") else {
+            return nil
+        }
+        let suffix = functionName.dropFirst("$sSo".count)
+        let digits = suffix.prefix(while: \.isNumber)
+        guard !digits.isEmpty,
+              let nameLength = Int(digits) else {
+            return nil
+        }
+        let nameStart = suffix.index(suffix.startIndex, offsetBy: digits.count)
+        guard let nameEnd = suffix.index(
+            nameStart,
+            offsetBy: nameLength,
+            limitedBy: suffix.endIndex
+        ) else {
+            return nil
+        }
+        let name = String(suffix[nameStart..<nameEnd])
+        guard !name.isEmpty else {
+            return nil
+        }
+        return (name, String(suffix[nameEnd...]))
+    }
+
+    private func makeUIViewSubclassFromFrameCall(
+        className: String,
+        arguments: [LLVMValue],
+        state: LLVMRuntimeState
+    ) throws -> LLVMValue {
 #if canImport(UIKit)
         guard arguments.count >= 4 else {
-            throw LLVMIRInterpreterError.runtime("UIView(frame:) bridge expects at least 4 arguments.")
+            throw LLVMIRInterpreterError.runtime("\(className)(frame:) bridge expects at least 4 arguments.")
         }
         let x = CGFloat(try scalarFromValue(arguments[0]))
         let y = CGFloat(try scalarFromValue(arguments[1]))
         let w = CGFloat(try scalarFromValue(arguments[2]))
         let h = CGFloat(try scalarFromValue(arguments[3]))
         return try withUIKitOnMainActor {
-            let view = UIView(frame: CGRect(x: x, y: y, width: w, height: h))
+            guard let viewClass = NSClassFromString(className) as? UIView.Type else {
+                throw LLVMIRInterpreterError.runtime(
+                    "Objective-C class \(className) is not a UIView subclass."
+                )
+            }
+            let view = viewClass.init(frame: CGRect(x: x, y: y, width: w, height: h))
             return .hostHandle(state.registerObject(view))
         }
 #else
@@ -842,6 +906,7 @@ private nonisolated struct LLVMModule {
 private nonisolated enum LLVMHostGlobal: Equatable, Sendable {
     case selector(name: String, symbol: String)
     case classReference(name: String, symbol: String)
+    case stringLiteral(value: String, symbol: String)
 }
 
 private nonisolated struct LLVMHostHandle: Equatable, Hashable, Sendable {
@@ -970,7 +1035,27 @@ private nonisolated final class LLVMRuntimeState: @unchecked Sendable {
             return .hostHandle(handle)
         case let .classReference(name, _):
             return try classReference(named: name)
+        case let .stringLiteral(value, _):
+            return .hostHandle(registerObject(value as NSString))
         }
+    }
+
+    func swiftStringLiteral(for value: LLVMValue) throws -> String {
+        let address: Int
+        switch value {
+        case let .pointer(pointer):
+            address = pointer
+        case let .hostHandle(handle):
+            address = handle.address
+        default:
+            throw LLVMIRInterpreterError.runtime("Swift string literal is not a pointer.")
+        }
+        guard case let .stringLiteral(literal, _)? = hostGlobals[address] else {
+            throw LLVMIRInterpreterError.runtime(
+                "Swift string literal global at address \(address) is unavailable."
+            )
+        }
+        return literal
     }
 
     func classReference(named name: String) throws -> LLVMValue {
@@ -1170,6 +1255,19 @@ private nonisolated enum LLVMValue: Sendable {
             return false
         }
     }
+
+    func matchesCallReturn(type: LLVMType) -> Bool {
+        if matches(type: type) {
+            return true
+        }
+        if case .aggregate = self,
+           case .ptr = type {
+            // The parser represents an opaque aggregate call return as ptr;
+            // extractvalue still observes the structured runtime value.
+            return true
+        }
+        return false
+    }
 }
 
 private nonisolated enum LLVMFunctionReturnType {
@@ -1328,7 +1426,65 @@ private nonisolated struct LLVMIRParser {
             guard !name.isEmpty else { return nil }
             return .classReference(name: name, symbol: symbol)
         }
+
+        if let literal = parseSwiftStringLiteral(symbol: symbol) {
+            return .stringLiteral(value: literal, symbol: symbol)
+        }
         return nil
+    }
+
+    private func parseSwiftStringLiteral(symbol: String) -> String? {
+        var name = symbol
+        if name.hasPrefix("@") {
+            name.removeFirst()
+        }
+        if name.hasPrefix("\""), name.hasSuffix("\""), name.count >= 2 {
+            name.removeFirst()
+            name.removeLast()
+        }
+        guard name.hasPrefix(".str.") else {
+            return nil
+        }
+
+        let suffix = name.dropFirst(".str.".count)
+        guard let separator = suffix.firstIndex(of: "."),
+              let expectedCount = Int(suffix[..<separator]) else {
+            return nil
+        }
+        let encoded = suffix[suffix.index(after: separator)...]
+        let source = Array(encoded.utf8)
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(expectedCount)
+        var index = 0
+        while index < source.count {
+            if source[index] == 0x5C,
+               index + 2 < source.count,
+               let high = hexDigit(source[index + 1]),
+               let low = hexDigit(source[index + 2]) {
+                bytes.append((high << 4) | low)
+                index += 3
+            } else {
+                bytes.append(source[index])
+                index += 1
+            }
+        }
+        guard bytes.count == expectedCount else {
+            return nil
+        }
+        return String(bytes: bytes, encoding: .utf8)
+    }
+
+    private func hexDigit(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 0x30...0x39:
+            return byte - 0x30
+        case 0x41...0x46:
+            return byte - 0x41 + 10
+        case 0x61...0x66:
+            return byte - 0x61 + 10
+        default:
+            return nil
+        }
     }
 
     private func globalSymbolTokens(in line: String) -> [String] {

@@ -401,12 +401,19 @@ nonisolated final class HotfixRuntime: @unchecked Sendable {
             host = LLVMHostContext(rootObject: receiver)
         }
 
-        return try? interpreter.run(
-            ir: patch.ir,
-            function: patch.entryFunction,
-            arguments: invocationArguments,
-            host: host
-        )
+        do {
+            return try interpreter.run(
+                ir: patch.ir,
+                function: patch.entryFunction,
+                arguments: invocationArguments,
+                host: host
+            )
+        } catch {
+#if DEBUG
+            print("[HotfixRuntime] Patch \(patch.id) failed for target \(targetID): \(error)")
+#endif
+            return nil
+        }
     }
 }
 

@@ -911,6 +911,44 @@ struct IRTests {
     }
 
     @MainActor
+    @Test func interpretUILabelAndSwiftStringBridgeProgram() throws {
+        let ir = """
+        define swiftcc void @patch(ptr swiftself %0) {
+        entry:
+          %1 = call swiftcc %swift.metadata_response @"$sSo7UILabelCMa"(i64 0)
+          %2 = extractvalue %swift.metadata_response %1, 0
+          %3 = call swiftcc ptr @"$sSo7UILabelC5frameABSo6CGRectV_tcfC"(double 1.000000e+01, double 1.000000e+01, double 8.000000e+01, double 2.000000e+01, ptr swiftself %2)
+          %4 = call swiftcc { i64, ptr } @"$sSS21_builtinStringLiteral17utf8CodeUnitCount7isASCIISSBp_BwBi1_tcfC"(ptr @.str.5.hello, i64 5, i1 true)
+          %5 = extractvalue { i64, ptr } %4, 0
+          %6 = extractvalue { i64, ptr } %4, 1
+          %7 = call swiftcc ptr @"$sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF"(i64 %5, ptr %6)
+          call void @swift_bridgeObjectRelease(ptr %6)
+          %8 = load ptr, ptr @"\\01L_selector(setText:)"
+          call void @objc_msgSend(ptr %3, ptr %8, ptr %7)
+          %9 = load ptr, ptr @"\\01L_selector(addSubview:)"
+          call void @objc_msgSend(ptr %0, ptr %9, ptr %3)
+          call void @llvm.objc.release(ptr %7)
+          call void @llvm.objc.release(ptr %3)
+          ret void
+        }
+        """
+        let root = UIView()
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.pointer(0)],
+            host: LLVMHostContext(rootObject: root)
+        )
+
+        let label = try #require(root.subviews.first as? UILabel)
+        #expect(result == .void)
+        #expect(root.subviews.count == 1)
+        #expect(label.frame == CGRect(x: 10, y: 10, width: 80, height: 20))
+        #expect(label.text == "hello")
+    }
+
+    @MainActor
     @Test func installSetupUIFromBundledTextPatch() throws {
         guard let patchURL = Bundle.main.url(forResource: "HotfixSetupUI", withExtension: "irpatch") else {
             throw CocoaError(.fileNoSuchFile)
