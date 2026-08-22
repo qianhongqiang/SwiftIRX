@@ -73,7 +73,8 @@ nonisolated final class LLVMIRInterpreter: Sendable {
             throw LLVMIRInterpreterError.parse("Missing @\(name) function.")
         }
 
-        let runtimeArguments = arguments.map { value in
+        let state = LLVMRuntimeState(hostGlobals: module.hostGlobals)
+        var runtimeArguments = arguments.map { value in
             switch value {
             case let .int(value):
                 return LLVMValue.int(value)
@@ -83,13 +84,21 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                 return LLVMValue.pointer(value)
             }
         }
+        if let rootObject = host?.rootObject,
+           function.parameters.first?.type == .ptr,
+           runtimeArguments.indices.contains(0),
+           case .pointer(0) = runtimeArguments[0] {
+            runtimeArguments[0] = .hostHandle(
+                state.registerObject(rootObject, symbol: "$host.root")
+            )
+        }
         let budget = LLVMExecutionBudget()
         try budget.enterFunction()
         defer { budget.leaveFunction() }
         let result = try execute(
             function: function,
             module: module,
-            state: LLVMRuntimeState(),
+            state: state,
             budget: budget,
             arguments: runtimeArguments,
             host: host
@@ -108,6 +117,8 @@ nonisolated final class LLVMIRInterpreter: Sendable {
             return .bool(value)
         case (.type(.ptr), .some(.pointer(let value))):
             return .pointer(value)
+        case (.type(.ptr), .some(.hostHandle(let handle))):
+            return .pointer(handle.address)
         case (.type, nil):
             throw LLVMIRInterpreterError.runtime("@\(name) returned void, expected a value.")
         case (.type, .some):
@@ -244,7 +255,7 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                         throw LLVMIRInterpreterError.runtime("inttoptr target must be ptr.")
                     }
                     let integer = try resolveInt(value, env: env)
-                    env[result] = .pointer(integer)
+                    env[result] = state.pointerValue(for: integer)
                 case let .extractvalue(result, aggregate, index):
                     let value = try resolve(operand: aggregate, env: env)
                     switch value {
@@ -313,9 +324,8 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                     let address = try resolvePointer(pointer, env: env)
                     if let loaded = state.memory[address] {
                         env[result] = loaded
-                    } else if address >= 2_000_000 {
-                        // Treat loads from unresolved global addresses as pointer constants.
-                        env[result] = .pointer(address)
+                    } else if let loaded = try state.loadHostGlobal(at: address) {
+                        env[result] = loaded
                     } else {
                         throw LLVMIRInterpreterError.runtime("Load from uninitialized address \(address).")
                     }
@@ -369,7 +379,7 @@ nonisolated final class LLVMIRInterpreter: Sendable {
                         resultName: result,
                         functionName: "asm",
                         returnType: returnType,
-                        callResult: defaultExternalReturnValue(for: returnType, state: state),
+                        callResult: defaultInlineAsmReturnValue(for: returnType),
                         env: &env
                     )
                 case let .br(label):
@@ -452,10 +462,14 @@ nonisolated final class LLVMIRInterpreter: Sendable {
 
     private func resolvePointer(_ operand: LLVMOperand, env: [String: LLVMValue]) throws -> Int {
         let value = try resolve(operand: operand, env: env)
-        guard case let .pointer(address) = value else {
+        switch value {
+        case let .pointer(address):
+            return address
+        case let .hostHandle(handle):
+            return handle.address
+        default:
             throw LLVMIRInterpreterError.runtime("Expected pointer value.")
         }
-        return address
     }
 
     private func resolveComparable(type: LLVMType, operand: LLVMOperand, env: [String: LLVMValue]) throws -> Int {
@@ -656,7 +670,7 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         }
 
         if functionName.contains("$sSo6UIViewCMa") {
-            return .some(.pointer(state.pointerForUIViewClass()))
+            return .some(try state.classReference(named: "UIView"))
         }
 
         if functionName.contains("$sSo6UIViewC5frameABSo6CGRectV_tcfC") {
@@ -671,19 +685,15 @@ nonisolated final class LLVMIRInterpreter: Sendable {
             return .some(try executeObjcMessageSend(arguments: arguments, declaredReturnType: declaredReturnType, state: state, host: host))
         }
 
-        // Generic external fallback: unresolved runtime calls still return a typed default.
-        return .some(defaultExternalReturnValue(for: declaredReturnType, state: state))
+        return nil
     }
 
-    private func defaultExternalReturnValue(
-        for returnType: LLVMFunctionReturnType,
-        state: LLVMRuntimeState
-    ) -> LLVMValue? {
+    private func defaultInlineAsmReturnValue(for returnType: LLVMFunctionReturnType) -> LLVMValue? {
         switch returnType {
         case .void:
             return nil
         case .type(.ptr):
-            return .pointer(state.allocateExternalPointer())
+            return .pointer(0)
         case .type(.i1):
             return .bool(false)
         case .type(.i8), .type(.i32), .type(.i64):
@@ -702,7 +712,7 @@ nonisolated final class LLVMIRInterpreter: Sendable {
         let h = CGFloat(try scalarFromValue(arguments[3]))
         return try withUIKitOnMainActor {
             let view = UIView(frame: CGRect(x: x, y: y, width: w, height: h))
-            return .pointer(state.registerObject(view))
+            return .hostHandle(state.registerObject(view))
         }
 #else
         return .pointer(state.allocateExternalPointer())
@@ -718,116 +728,70 @@ nonisolated final class LLVMIRInterpreter: Sendable {
 #if canImport(UIKit)
         return try withUIKitOnMainActor {
             guard arguments.count >= 2 else {
-                return defaultExternalReturnValue(for: declaredReturnType, state: state)
+                throw LLVMIRInterpreterError.runtime("objc_msgSend expects a receiver and selector.")
             }
 
             let receiver = arguments[0]
             let selectorValue = arguments[1]
-            guard case let .pointer(selectorAddress) = selectorValue,
-                  let selector = state.selectorName(for: selectorAddress) else {
-                // Fallback for selector encoding mismatches (\01, escaped variants, etc.).
-                return try executeObjcMessageSendHeuristic(
-                    receiver: receiver,
-                    arguments: arguments,
-                    declaredReturnType: declaredReturnType,
-                    state: state,
-                    host: host
-                )
+            guard let selector = state.selectorName(for: selectorValue) else {
+                throw LLVMIRInterpreterError.runtime("objc_msgSend selector is not a structured Host Handle.")
             }
 
-            let receiverObject = resolveReceiverObject(receiver, state: state, host: host)
+            if case .pointer(0) = receiver {
+                return nilObjcMessageResult(for: declaredReturnType)
+            }
 
-            switch selector {
-            case "redColor":
-                let color = UIColor.red
-                return .pointer(state.registerObject(color))
-            case "setBackgroundColor:":
-                if let view = receiverObject as? UIView,
-                   arguments.count >= 3,
-                   let color = state.object(for: arguments[2]) as? UIColor {
-                    view.backgroundColor = color
+            guard let receiverObject = state.object(for: receiver) else {
+                throw LLVMIRInterpreterError.runtime("objc_msgSend receiver is not a live object.")
+            }
+
+            let bridgeArguments = try arguments.dropFirst(2).map {
+                try state.objcBridgeValue(for: $0)
+            }
+            let invocation = selector.withCString { selectorName in
+                bridgeArguments.withUnsafeBufferPointer { buffer in
+                    IRHFObjCInvoke(
+                        Unmanaged.passUnretained(receiverObject).toOpaque(),
+                        selectorName,
+                        buffer.baseAddress,
+                        buffer.count
+                    )
                 }
+            }
+            guard invocation.status.rawValue == 0 else {
+                let message = String(cString: IRHFObjCInvocationStatusDescription(invocation.status))
+                throw LLVMIRInterpreterError.runtime(
+                    "Objective-C call \(selector) failed: \(message)."
+                )
+            }
+            let result = try state.value(from: invocation.value)
+            switch (declaredReturnType, result) {
+            case (.void, nil):
                 return nil
-            case "view":
-                if let vc = receiverObject as? UIViewController {
-                    return .pointer(state.registerObject(vc.view))
-                }
-                return defaultExternalReturnValue(for: declaredReturnType, state: state)
-            case "addSubview:":
-                if let view = receiverObject as? UIView,
-                   arguments.count >= 3,
-                   let child = state.object(for: arguments[2]) as? UIView {
-                    view.addSubview(child)
-                    print("[LLVMBridge] addSubview executed, child frame: \(child.frame)")
-                }
-                return nil
+            case (.type(let expected), .some(let value)) where value.matches(type: expected):
+                return value
             default:
-                return try executeObjcMessageSendHeuristic(
-                    receiver: receiver,
-                    arguments: arguments,
-                    declaredReturnType: declaredReturnType,
-                    state: state,
-                    host: host
+                throw LLVMIRInterpreterError.runtime(
+                    "Objective-C call \(selector) returned a value incompatible with its LLVM declaration."
                 )
             }
         }
 #else
-        return defaultExternalReturnValue(for: declaredReturnType, state: state)
+        throw LLVMIRInterpreterError.runtime("Objective-C invocation is unavailable on this platform.")
 #endif
     }
 
-    private func executeObjcMessageSendHeuristic(
-        receiver: LLVMValue,
-        arguments: [LLVMValue],
-        declaredReturnType: LLVMFunctionReturnType,
-        state: LLVMRuntimeState,
-        host: LLVMHostContext?
-    ) throws -> LLVMValue? {
-#if canImport(UIKit)
-        return try withUIKitOnMainActor {
-            let receiverObject = resolveReceiverObject(receiver, state: state, host: host)
-
-            // UIColor.red class-style getter.
-            if arguments.count == 2, case let .pointer(addr) = receiver, state.isUIColorClassAddress(addr) {
-                let color = UIColor.red
-                return .pointer(state.registerObject(color))
-            }
-
-            // UIViewController.view getter.
-            if arguments.count == 2, let vc = receiverObject as? UIViewController {
-                return .pointer(state.registerObject(vc.view))
-            }
-
-            if arguments.count >= 3, let view = receiverObject as? UIView {
-                if let color = state.object(for: arguments[2]) as? UIColor {
-                    view.backgroundColor = color
-                    return nil
-                }
-                if let child = state.object(for: arguments[2]) as? UIView {
-                    view.addSubview(child)
-                    print("[LLVMBridge] heuristic addSubview executed, child frame: \(child.frame)")
-                    return nil
-                }
-            }
-            return defaultExternalReturnValue(for: declaredReturnType, state: state)
+    private func nilObjcMessageResult(for returnType: LLVMFunctionReturnType) -> LLVMValue? {
+        switch returnType {
+        case .void:
+            return nil
+        case .type(.ptr):
+            return .pointer(0)
+        case .type(.i1):
+            return .bool(false)
+        case .type(.i8), .type(.i32), .type(.i64):
+            return .int(0)
         }
-#else
-        return defaultExternalReturnValue(for: declaredReturnType, state: state)
-#endif
-    }
-
-    private func resolveReceiverObject(
-        _ receiver: LLVMValue,
-        state: LLVMRuntimeState,
-        host: LLVMHostContext?
-    ) -> AnyObject? {
-        if let object = state.object(for: receiver) {
-            return object
-        }
-        if case let .pointer(address) = receiver, address == 0 {
-            return host?.rootObject
-        }
-        return nil
     }
 
     private func scalarFromValue(_ value: LLVMValue) throws -> Double {
@@ -844,6 +808,25 @@ nonisolated final class LLVMIRInterpreter: Sendable {
 
 private nonisolated struct LLVMModule {
     let functions: [String: LLVMFunction]
+    let hostGlobals: [Int: LLVMHostGlobal]
+}
+
+private nonisolated enum LLVMHostGlobal: Equatable, Sendable {
+    case selector(name: String, symbol: String)
+    case classReference(name: String, symbol: String)
+}
+
+private nonisolated struct LLVMHostHandle: Equatable, Hashable, Sendable {
+    enum Kind: UInt8, Sendable {
+        case object
+        case classReference
+        case selector
+        case nativeSymbol
+    }
+
+    let address: Int
+    let kind: Kind
+    let symbol: String
 }
 
 // Each instance is confined to one synchronous interpreter invocation.
@@ -877,11 +860,17 @@ private nonisolated final class LLVMExecutionBudget: @unchecked Sendable {
 private nonisolated final class LLVMRuntimeState: @unchecked Sendable {
     var memory: [Int: LLVMValue] = [:]
     var nextAddress = 1
+    private let hostGlobals: [Int: LLVMHostGlobal]
     private var nextExternalAddress = 1_000_000
     private var derivedPointerTable: [String: Int] = [:]
     private var nextObjectAddress = 3_000_000
+    private var handleByAddress: [Int: LLVMHostHandle] = [:]
     private var objectByAddress: [Int: AnyObject] = [:]
     private var addressByObjectID: [ObjectIdentifier: Int] = [:]
+
+    init(hostGlobals: [Int: LLVMHostGlobal]) {
+        self.hostGlobals = hostGlobals
+    }
 
     func allocateExternalPointer() -> Int {
         let pointer = nextExternalAddress
@@ -900,54 +889,146 @@ private nonisolated final class LLVMRuntimeState: @unchecked Sendable {
         return address
     }
 
-    func registerObject(_ object: AnyObject) -> Int {
+    func registerObject(
+        _ object: AnyObject,
+        kind: LLVMHostHandle.Kind = .object,
+        symbol: String = ""
+    ) -> LLVMHostHandle {
         let id = ObjectIdentifier(object)
         if let existing = addressByObjectID[id] {
-            return existing
+            if let handle = handleByAddress[existing] {
+                return handle
+            }
+            let handle = LLVMHostHandle(address: existing, kind: kind, symbol: symbol)
+            handleByAddress[existing] = handle
+            return handle
         }
         let address = nextObjectAddress
         nextObjectAddress += 1
+        let handle = LLVMHostHandle(address: address, kind: kind, symbol: symbol)
         addressByObjectID[id] = address
         objectByAddress[address] = object
-        return address
+        handleByAddress[address] = handle
+        return handle
     }
 
     func object(for value: LLVMValue) -> AnyObject? {
-        guard case let .pointer(address) = value else { return nil }
-        if address == 0 { return nil }
-        return objectByAddress[address]
+        switch value {
+        case let .hostHandle(handle):
+            return objectByAddress[handle.address]
+        case let .pointer(address):
+            guard address != 0 else { return nil }
+            return objectByAddress[address]
+        default:
+            return nil
+        }
     }
 
-    func pointerForUIViewClass() -> Int {
-        let symbol = #"@"OBJC_CLASS_REF_$_UIView""#
-        return llvmStableSymbolAddress(symbol)
+    func pointerValue(for address: Int) -> LLVMValue {
+        if let handle = handleByAddress[address] {
+            return .hostHandle(handle)
+        }
+        return .pointer(address)
     }
 
-    func selectorName(for address: Int) -> String? {
-        let table: [Int: String] = [
-            llvmStableSymbolAddress(#"@"\01L_selector(redColor)""#): "redColor",
-            llvmStableSymbolAddress(#"@"\u{0}1L_selector(redColor)""#): "redColor",
-            llvmStableSymbolAddress(#"@"_1L_selector(redColor)""#): "redColor",
-            llvmStableSymbolAddress(#"@"\01L_selector(setBackgroundColor:)""#): "setBackgroundColor:",
-            llvmStableSymbolAddress(#"@"\u{0}1L_selector(setBackgroundColor:)""#): "setBackgroundColor:",
-            llvmStableSymbolAddress(#"@"_1L_selector(setBackgroundColor:)""#): "setBackgroundColor:",
-            llvmStableSymbolAddress(#"@"\01L_selector(view)""#): "view",
-            llvmStableSymbolAddress(#"@"\u{0}1L_selector(view)""#): "view",
-            llvmStableSymbolAddress(#"@"_1L_selector(view)""#): "view",
-            llvmStableSymbolAddress(#"@"\01L_selector(addSubview:)""#): "addSubview:",
-            llvmStableSymbolAddress(#"@"\u{0}1L_selector(addSubview:)""#): "addSubview:",
-            llvmStableSymbolAddress(#"@"_1L_selector(addSubview:)""#): "addSubview:",
-            llvmStableSymbolAddress(#"@"\01L_selector(viewDidLoad)""#): "viewDidLoad"
-        ]
-        return table[address]
+    func loadHostGlobal(at address: Int) throws -> LLVMValue? {
+        guard let global = hostGlobals[address] else {
+            return nil
+        }
+        switch global {
+        case let .selector(name, _):
+            let handle = LLVMHostHandle(address: address, kind: .selector, symbol: name)
+            handleByAddress[address] = handle
+            return .hostHandle(handle)
+        case let .classReference(name, _):
+            return try classReference(named: name)
+        }
     }
 
-    func isUIColorClassAddress(_ address: Int) -> Bool {
-        let candidates: Set<Int> = [
-            llvmStableSymbolAddress(#"@"OBJC_CLASS_REF_$_UIColor""#),
-            llvmStableSymbolAddress(#"@"OBJC_CLASS_$_UIColor""#)
-        ]
-        return candidates.contains(address)
+    func classReference(named name: String) throws -> LLVMValue {
+        let pointer = name.withCString { IRHFObjCLookUpClass($0) }
+        guard let pointer else {
+            throw LLVMIRInterpreterError.runtime("Objective-C class \(name) was not found.")
+        }
+        let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+        return .hostHandle(registerObject(object, kind: .classReference, symbol: name))
+    }
+
+    func selectorName(for value: LLVMValue) -> String? {
+        guard case let .hostHandle(handle) = value,
+              handle.kind == .selector else {
+            return nil
+        }
+        return handle.symbol
+    }
+
+    func objcBridgeValue(for value: LLVMValue) throws -> IRHFValue {
+        var bridge = IRHFValue()
+        bridge.bytes = nil
+        bridge.byteCount = 0
+
+        switch value {
+        case let .int(integer):
+            bridge.kind = IRHFValueKind(rawValue: 1)
+            bridge.bits = UInt64(bitPattern: Int64(integer))
+        case let .bool(boolean):
+            bridge.kind = IRHFValueKind(rawValue: 3)
+            bridge.bits = boolean ? 1 : 0
+        case let .pointer(address):
+            bridge.kind = IRHFValueKind(rawValue: 6)
+            bridge.bits = UInt64(UInt(bitPattern: address))
+        case let .hostHandle(handle):
+            switch handle.kind {
+            case .object, .classReference:
+                guard let object = objectByAddress[handle.address] else {
+                    throw LLVMIRInterpreterError.runtime("Host object handle is no longer live.")
+                }
+                bridge.kind = IRHFValueKind(rawValue: 7)
+                bridge.bits = UInt64(UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque()))
+            case .selector:
+                let pointer = handle.symbol.withCString { IRHFObjCRegisterSelector($0) }
+                bridge.kind = IRHFValueKind(rawValue: 6)
+                bridge.bits = UInt64(UInt(bitPattern: pointer))
+            case .nativeSymbol:
+                bridge.kind = IRHFValueKind(rawValue: 6)
+                bridge.bits = UInt64(UInt(bitPattern: handle.address))
+            }
+        case .aggregate:
+            throw LLVMIRInterpreterError.runtime(
+                "Objective-C aggregate arguments require byte-layout lowering."
+            )
+        }
+        return bridge
+    }
+
+    func value(from bridge: IRHFValue) throws -> LLVMValue? {
+        switch bridge.kind.rawValue {
+        case 9:
+            return nil
+        case 1, 2:
+            return .int(Int(bitPattern: UInt(bridge.bits)))
+        case 3:
+            return .bool(bridge.bits != 0)
+        case 6:
+            return pointerValue(for: Int(bitPattern: UInt(bridge.bits)))
+        case 7:
+            guard bridge.bits != 0,
+                  let pointer = UnsafeRawPointer(bitPattern: UInt(bridge.bits)) else {
+                return .pointer(0)
+            }
+            let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeRetainedValue()
+            return .hostHandle(registerObject(object))
+        case 4, 5:
+            throw LLVMIRInterpreterError.runtime(
+                "Floating-point Objective-C results are not represented by the current LLVMValue model."
+            )
+        case 8:
+            throw LLVMIRInterpreterError.runtime(
+                "Aggregate Objective-C results require byte-layout lowering."
+            )
+        default:
+            throw LLVMIRInterpreterError.runtime("Objective-C bridge returned an invalid value kind.")
+        }
     }
 }
 
@@ -1034,11 +1115,13 @@ private nonisolated enum LLVMValue: Sendable {
     case int(Int)
     case bool(Bool)
     case pointer(Int)
+    case hostHandle(LLVMHostHandle)
     case aggregate([LLVMValue])
 
     func matches(type: LLVMType) -> Bool {
         switch (self, type) {
-        case (.int, .i8), (.int, .i32), (.int, .i64), (.bool, .i1), (.pointer, .ptr):
+        case (.int, .i8), (.int, .i32), (.int, .i64), (.bool, .i1),
+             (.pointer, .ptr), (.hostHandle, .ptr):
             return true
         default:
             return false
@@ -1077,6 +1160,7 @@ private nonisolated enum LLVMFunctionReturnType {
 private nonisolated struct LLVMIRParser {
     func parseModule(ir: String) throws -> LLVMModule {
         let lines = sanitizeLines(ir)
+        let hostGlobals = try parseHostGlobals(lines: lines)
         var index = 0
         var functions: [String: LLVMFunction] = [:]
 
@@ -1137,7 +1221,7 @@ private nonisolated struct LLVMIRParser {
             )
         }
 
-        return LLVMModule(functions: functions)
+        return LLVMModule(functions: functions, hostGlobals: hostGlobals)
     }
 
     private func sanitizeLines(_ ir: String) -> [String] {
@@ -1151,6 +1235,84 @@ private nonisolated struct LLVMIRParser {
                 return line.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { !$0.isEmpty }
+    }
+
+    private func parseHostGlobals(lines: [String]) throws -> [Int: LLVMHostGlobal] {
+        var globals: [Int: LLVMHostGlobal] = [:]
+        for line in lines {
+            for symbol in globalSymbolTokens(in: line) {
+                guard let global = parseHostGlobal(symbol: symbol) else {
+                    continue
+                }
+                let address = llvmStableSymbolAddress(symbol)
+                if let existing = globals[address], existing != global {
+                    throw LLVMIRInterpreterError.parse(
+                        "Host global address collision between \(existing) and \(global)."
+                    )
+                }
+                globals[address] = global
+            }
+        }
+        return globals
+    }
+
+    private func parseHostGlobal(symbol: String) -> LLVMHostGlobal? {
+        if let marker = symbol.range(of: "L_selector(") {
+            let suffix = symbol[marker.upperBound...]
+            guard let close = suffix.firstIndex(of: ")") else {
+                return nil
+            }
+            let name = String(suffix[..<close])
+            guard !name.isEmpty else { return nil }
+            return .selector(name: name, symbol: symbol)
+        }
+
+        for marker in ["OBJC_CLASS_REF_$_", "OBJC_CLASS_$_"] {
+            guard let range = symbol.range(of: marker) else { continue }
+            let suffix = symbol[range.upperBound...]
+            let name = String(suffix.prefix { character in
+                character != "\"" && character != "\\"
+            })
+            guard !name.isEmpty else { return nil }
+            return .classReference(name: name, symbol: symbol)
+        }
+        return nil
+    }
+
+    private func globalSymbolTokens(in line: String) -> [String] {
+        var tokens: [String] = []
+        var cursor = line.startIndex
+
+        while cursor < line.endIndex,
+              let atSign = line[cursor...].firstIndex(of: "@") {
+            let afterAt = line.index(after: atSign)
+            guard afterAt < line.endIndex else { break }
+
+            if line[afterAt] == "\"" {
+                let bodyStart = line.index(after: afterAt)
+                guard let closingQuote = line[bodyStart...].firstIndex(of: "\"") else {
+                    break
+                }
+                let tokenEnd = line.index(after: closingQuote)
+                tokens.append(String(line[atSign..<tokenEnd]))
+                cursor = tokenEnd
+                continue
+            }
+
+            var tokenEnd = afterAt
+            while tokenEnd < line.endIndex {
+                let character = line[tokenEnd]
+                if character.isWhitespace || ",()[]{}=".contains(character) {
+                    break
+                }
+                tokenEnd = line.index(after: tokenEnd)
+            }
+            if tokenEnd > afterAt {
+                tokens.append(String(line[atSign..<tokenEnd]))
+            }
+            cursor = tokenEnd > atSign ? tokenEnd : afterAt
+        }
+        return tokens
     }
 
     private func parseFunctionHeader(header: String) throws -> (name: String, returnType: LLVMFunctionReturnType, parameters: [LLVMFunctionParameter]) {

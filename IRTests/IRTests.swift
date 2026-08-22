@@ -365,6 +365,88 @@ struct IRTests {
         #expect(result == 42)
     }
 
+    @MainActor
+    @Test func genericObjCInvokerMarshalsIntegerAndBoolValues() throws {
+        let ir = """
+        define i64 @patch(ptr %self) {
+        entry:
+          %setTagSelector = load ptr, ptr @"\\01L_selector(setTag:)"
+          call void @objc_msgSend(ptr %self, ptr %setTagSelector, i64 73)
+          %setHiddenSelector = load ptr, ptr @"\\01L_selector(setHidden:)"
+          call void @objc_msgSend(ptr %self, ptr %setHiddenSelector, i1 true)
+          %tagSelector = load ptr, ptr @"\\01L_selector(tag)"
+          %tag = call i64 @objc_msgSend(ptr %self, ptr %tagSelector)
+          %hiddenSelector = load ptr, ptr @"\\01L_selector(isHidden)"
+          %hidden = call i1 @objc_msgSend(ptr %self, ptr %hiddenSelector)
+          br i1 %hidden, label %hiddenResult, label %visibleResult
+        hiddenResult:
+          %result = add i64 %tag, 1
+          ret i64 %result
+        visibleResult:
+          ret i64 %tag
+        }
+        """
+        let view = UIView()
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.pointer(0)],
+            host: LLVMHostContext(rootObject: view)
+        )
+
+        #expect(result == .int(74))
+        #expect(view.tag == 73)
+        #expect(view.isHidden)
+    }
+
+    @MainActor
+    @Test func objcNilReceiverDoesNotAliasHostRoot() throws {
+        let ir = """
+        define i1 @patch(ptr %self) {
+        entry:
+          %superviewSelector = load ptr, ptr @"\\01L_selector(superview)"
+          %nullableSuperview = call ptr @objc_msgSend(ptr %self, ptr %superviewSelector)
+          %setHiddenSelector = load ptr, ptr @"\\01L_selector(setHidden:)"
+          call void @objc_msgSend(ptr %nullableSuperview, ptr %setHiddenSelector, i1 true)
+          %hiddenSelector = load ptr, ptr @"\\01L_selector(isHidden)"
+          %hidden = call i1 @objc_msgSend(ptr %self, ptr %hiddenSelector)
+          ret i1 %hidden
+        }
+        """
+        let view = UIView()
+
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "patch",
+            arguments: [.pointer(0)],
+            host: LLVMHostContext(rootObject: view)
+        )
+
+        #expect(result == .bool(false))
+        #expect(!view.isHidden)
+    }
+
+    @Test func unknownExternalFunctionFailsInsteadOfReturningDefaultValue() {
+        let ir = """
+        define i64 @patch() {
+        entry:
+          %value = call i64 @unknown_runtime_function()
+          ret i64 %value
+        }
+        """
+
+        #expect(throws: LLVMIRInterpreterError.runtime(
+            "Call to unknown function @unknown_runtime_function."
+        )) {
+            try LLVMIRInterpreter().run(
+                ir: ir,
+                function: "patch",
+                arguments: []
+            )
+        }
+    }
+
     @Test func interpretBranchAndPhiProgram() throws {
         let ir = """
         define i32 @main() {
@@ -785,10 +867,19 @@ struct IRTests {
         }
         """
 
-        let interpreter = LLVMIRInterpreter()
-        let result = try interpreter.runMain(ir: ir)
+        let viewController = UIViewController()
+        _ = viewController.view
+        let result = try LLVMIRInterpreter().run(
+            ir: ir,
+            function: "$s14ViewControllerAAC7setupUI33_37ACD668159BB52851391EE68C0B8918LLyyF",
+            arguments: [.pointer(0)],
+            host: LLVMHostContext(rootViewController: viewController)
+        )
 
-        #expect(result == 42)
+        #expect(result == .void)
+        #expect(viewController.view.subviews.count == 1)
+        #expect(viewController.view.subviews.first?.frame == CGRect(x: 0, y: 0, width: 100, height: 100))
+        #expect(viewController.view.subviews.first?.backgroundColor == UIColor.red)
     }
 
     @Test func hotfixExecutorUsesActivePatch() throws {
@@ -1036,9 +1127,12 @@ struct IRTests {
             ir: """
             define i64 @patch(ptr %self, i64 %value) {
             entry:
-              %selfBits = ptrtoint ptr %self to i64
-              %result = add i64 %selfBits, %value
-              ret i64 %result
+              %hasReceiver = icmp ne ptr %self, null
+              br i1 %hasReceiver, label %receiverPresent, label %receiverMissing
+            receiverPresent:
+              ret i64 %value
+            receiverMissing:
+              ret i64 0
             }
             """
         )
