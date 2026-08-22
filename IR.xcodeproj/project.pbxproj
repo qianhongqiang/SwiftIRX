@@ -34,6 +34,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				PatchSources/HotfixSetupUI.swift,
 			);
 			target = 7C3D7DEB2F6ADD6E00984DDC /* IR */;
 		};
@@ -278,6 +279,7 @@
 			inputPaths = (
 				"$(SRCROOT)/Tools/HotfixPass/CMakeLists.txt",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixManifestTool.cpp",
+				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPatchTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPass.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/generate-class-receiver-manifest.sh",
 				"$(SRCROOT)/Tools/HotfixPass/swiftc-hotfix",
@@ -286,11 +288,12 @@
 			outputPaths = (
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/libHotfixPass.dylib",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixManifestTool",
+				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixPatchTool",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixInstrumentationStamp.h",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "set -euo pipefail\nif [[ \"$CONFIGURATION\" != \"Debug\" ]]; then\n  exit 0\nfi\nLLVM_CONFIG=/opt/homebrew/opt/llvm@19/bin/llvm-config\nCMAKE=/opt/homebrew/bin/cmake\nif [[ ! -x \"$LLVM_CONFIG\" ]]; then\n  echo \"error: Homebrew LLVM 19 llvm-config is missing: $LLVM_CONFIG\" >&2\n  exit 1\nfi\nif [[ ! -x \"$CMAKE\" ]]; then\n  echo \"error: Homebrew CMake is missing: $CMAKE\" >&2\n  exit 1\nfi\nif [[ \"$(\"$LLVM_CONFIG\" --version)\" != \"19.1.7\" ]]; then\n  echo \"error: HotfixPass requires Homebrew LLVM 19.1.7\" >&2\n  exit 1\nfi\nPRODUCT_DIR=\"$DERIVED_FILE_DIR/HotfixPassProduct\"\nSTAMP=\"$PRODUCT_DIR/HotfixInstrumentationStamp.h\"\nHOST_SDK=\"$(xcrun --sdk macosx --show-sdk-path)\"\nHOST_ARCH=\"$(uname -m)\"\nHOST_DEPLOYMENT_TARGET=\"$(sw_vers -productVersion | awk -F. '{ print $1 \".0\" }')\"\nHOST_TARGET=\"${HOST_ARCH}-apple-macosx${HOST_DEPLOYMENT_TARGET}\"\nCMAKE_ENV=(env -u IPHONEOS_DEPLOYMENT_TARGET SDKROOT=\"$HOST_SDK\" MACOSX_DEPLOYMENT_TARGET=\"$HOST_DEPLOYMENT_TARGET\")\n\"${CMAKE_ENV[@]}\" \"$CMAKE\" -S \"$SRCROOT/Tools/HotfixPass\" -B \"$DERIVED_FILE_DIR/HotfixPass\" -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_OSX_SYSROOT=\"$HOST_SDK\" -DCMAKE_OSX_ARCHITECTURES=\"$HOST_ARCH\" -DCMAKE_OSX_DEPLOYMENT_TARGET=\"$HOST_DEPLOYMENT_TARGET\" -DCMAKE_C_COMPILER_TARGET=\"$HOST_TARGET\" -DCMAKE_CXX_COMPILER_TARGET=\"$HOST_TARGET\" -DHOTFIX_PASS_OUTPUT_DIRECTORY=\"$PRODUCT_DIR\"\n\"${CMAKE_ENV[@]}\" \"$CMAKE\" --build \"$DERIVED_FILE_DIR/HotfixPass\" --config Release\ntest -f \"$PRODUCT_DIR/libHotfixPass.dylib\"\ntest -x \"$PRODUCT_DIR/HotfixManifestTool\"\nFINGERPRINT=$(shasum -a 256 \"$SRCROOT/Tools/HotfixPass/CMakeLists.txt\" \"$SRCROOT/Tools/HotfixPass/Sources/HotfixPass.cpp\" \"$SRCROOT/Tools/HotfixPass/Sources/HotfixManifestTool.cpp\" \"$SRCROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh\" \"$SRCROOT/Tools/HotfixPass/swiftc-hotfix\" \"$SRCROOT/SDK/IRHotfixSDK/ABI/\"*.h | shasum -a 256 | awk '{ print $1 }')\nTEMP_STAMP=\"$PRODUCT_DIR/.HotfixInstrumentationStamp.$$\"\nprintf '#define IR_HOTFIX_INSTRUMENTATION_FINGERPRINT \"%s\"\\n' \"$FINGERPRINT\" >\"$TEMP_STAMP\"\nif [[ ! -f \"$STAMP\" ]] || ! cmp -s \"$TEMP_STAMP\" \"$STAMP\"; then\n  mv -f \"$TEMP_STAMP\" \"$STAMP\"\nelse\n  find \"$TEMP_STAMP\" -delete\nfi\n";
+			shellScript = "set -euo pipefail\nif [[ \"$CONFIGURATION\" != \"Debug\" ]]; then\n  exit 0\nfi\nLLVM_CONFIG=/opt/homebrew/opt/llvm@19/bin/llvm-config\nCMAKE=/opt/homebrew/bin/cmake\nif [[ ! -x \"$LLVM_CONFIG\" ]]; then\n  echo \"error: Homebrew LLVM 19 llvm-config is missing: $LLVM_CONFIG\" >&2\n  exit 1\nfi\nif [[ ! -x \"$CMAKE\" ]]; then\n  echo \"error: Homebrew CMake is missing: $CMAKE\" >&2\n  exit 1\nfi\nif [[ \"$(\"$LLVM_CONFIG\" --version)\" != \"19.1.7\" ]]; then\n  echo \"error: HotfixPass requires Homebrew LLVM 19.1.7\" >&2\n  exit 1\nfi\nPRODUCT_DIR=\"$DERIVED_FILE_DIR/HotfixPassProduct\"\nSTAMP=\"$PRODUCT_DIR/HotfixInstrumentationStamp.h\"\nHOST_SDK=\"$(xcrun --sdk macosx --show-sdk-path)\"\nHOST_ARCH=\"$(uname -m)\"\nHOST_DEPLOYMENT_TARGET=\"$(sw_vers -productVersion | awk -F. '{ print $1 \".0\" }')\"\nHOST_TARGET=\"${HOST_ARCH}-apple-macosx${HOST_DEPLOYMENT_TARGET}\"\nCMAKE_ENV=(env -u IPHONEOS_DEPLOYMENT_TARGET SDKROOT=\"$HOST_SDK\" MACOSX_DEPLOYMENT_TARGET=\"$HOST_DEPLOYMENT_TARGET\")\n\"${CMAKE_ENV[@]}\" \"$CMAKE\" -S \"$SRCROOT/Tools/HotfixPass\" -B \"$DERIVED_FILE_DIR/HotfixPass\" -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_OSX_SYSROOT=\"$HOST_SDK\" -DCMAKE_OSX_ARCHITECTURES=\"$HOST_ARCH\" -DCMAKE_OSX_DEPLOYMENT_TARGET=\"$HOST_DEPLOYMENT_TARGET\" -DCMAKE_C_COMPILER_TARGET=\"$HOST_TARGET\" -DCMAKE_CXX_COMPILER_TARGET=\"$HOST_TARGET\" -DHOTFIX_PASS_OUTPUT_DIRECTORY=\"$PRODUCT_DIR\"\n\"${CMAKE_ENV[@]}\" \"$CMAKE\" --build \"$DERIVED_FILE_DIR/HotfixPass\" --config Release\ntest -f \"$PRODUCT_DIR/libHotfixPass.dylib\"\ntest -x \"$PRODUCT_DIR/HotfixManifestTool\"\ntest -x \"$PRODUCT_DIR/HotfixPatchTool\"\nFINGERPRINT=$(shasum -a 256 \"$SRCROOT/Tools/HotfixPass/CMakeLists.txt\" \"$SRCROOT/Tools/HotfixPass/Sources/HotfixPass.cpp\" \"$SRCROOT/Tools/HotfixPass/Sources/HotfixManifestTool.cpp\" \"$SRCROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh\" \"$SRCROOT/Tools/HotfixPass/swiftc-hotfix\" \"$SRCROOT/SDK/IRHotfixSDK/ABI/\"*.h | shasum -a 256 | awk '{ print $1 }')\nTEMP_STAMP=\"$PRODUCT_DIR/.HotfixInstrumentationStamp.$$\"\nprintf '#define IR_HOTFIX_INSTRUMENTATION_FINGERPRINT \"%s\"\\n' \"$FINGERPRINT\" >\"$TEMP_STAMP\"\nif [[ ! -f \"$STAMP\" ]] || ! cmp -s \"$TEMP_STAMP\" \"$STAMP\"; then\n  mv -f \"$TEMP_STAMP\" \"$STAMP\"\nelse\n  find \"$TEMP_STAMP\" -delete\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

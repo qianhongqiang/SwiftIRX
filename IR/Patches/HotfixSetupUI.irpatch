@@ -1,49 +1,47 @@
-define hidden swiftcc void @"$s2IR14ViewControllerC7setupUI33_7B2304FAFD7CFEBD5E611A21DD4D9FE6LLyyF"(ptr swiftself %0) #0 {
+define dso_local swiftcc void @"$s2IR14ViewControllerC7setupUI33_7B2304FAFD7CFEBD5E611A21DD4D9FE6LLyyF"(ptr %0) #0 {
 entry:
-  %self.debug = alloca ptr, align 8
-  call void @llvm.memset.p0.i64(ptr align 8 %self.debug, i8 0, i64 8, i1 false)
-  %view.debug = alloca ptr, align 8
-  call void @llvm.memset.p0.i64(ptr align 8 %view.debug, i8 0, i64 8, i1 false)
-  store ptr %0, ptr %self.debug, align 8
-  %1 = call swiftcc %swift.metadata_response @"$sSo6UIViewCMa"(i64 0)
-  %2 = extractvalue %swift.metadata_response %1, 0
-  %3 = call swiftcc ptr @"$sSo6UIViewC5frameABSo6CGRectV_tcfC"(double 0.000000e+00, double 0.000000e+00, double 1.000000e+02, double 1.000000e+02, ptr swiftself %2)
-  store ptr %3, ptr %view.debug, align 8
-  %4 = load ptr, ptr @"OBJC_CLASS_REF_$_UIColor", align 8
-  %5 = call ptr @objc_opt_self(ptr %4)
-  %6 = load ptr, ptr @"\01L_selector(redColor)", align 8
-  %7 = call ptr @objc_msgSend(ptr %5, ptr %6)
+  %1 = alloca ptr, align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %1, i8 0, i64 8, i1 false)
+  %2 = alloca ptr, align 8
+  call void @llvm.memset.p0.i64(ptr align 8 %2, i8 0, i64 8, i1 false)
+  store ptr %0, ptr %1, align 8
+  %3 = call swiftcc %swift.metadata_response @"$sSo6UIViewCMa"(i64 0) #7
+  %4 = extractvalue %swift.metadata_response %3, 0
+  %5 = call swiftcc ptr @"$sSo6UIViewC5frameABSo6CGRectV_tcfC"(double 0.000000e+00, double 0.000000e+00, double 1.000000e+02, double 1.000000e+02, ptr swiftself %4)
+  store ptr %5, ptr %2, align 8
+  %6 = load ptr, ptr @"OBJC_CLASS_REF_$_UIColor", align 8
+  %7 = call ptr @objc_opt_self(ptr %6) #3
+  %8 = load ptr, ptr @"\01L_selector(redColor)", align 8
+  %9 = call ptr @objc_msgSend(ptr %7, ptr %8)
   call void asm sideeffect "mov\09fp, fp\09\09// marker for objc_retainAutoreleaseReturnValue", ""()
-  %8 = call ptr @llvm.objc.retainAutoreleasedReturnValue(ptr %7)
-  %9 = ptrtoint ptr %8 to i64
-  %10 = load ptr, ptr @"\01L_selector(setBackgroundColor:)", align 8
-  %11 = inttoptr i64 %9 to ptr
-  call void @objc_msgSend(ptr %3, ptr %10, ptr %11)
-  %12 = inttoptr i64 %9 to ptr
-  call void @llvm.objc.release(ptr %12)
-  %13 = call ptr @llvm.objc.retain(ptr %0)
-  %14 = load ptr, ptr @"\01L_selector(view)", align 8
-  %15 = call ptr @objc_msgSend(ptr %0, ptr %14)
+  %10 = call ptr @llvm.objc.retainAutoreleasedReturnValue(ptr %9)
+  %11 = ptrtoint ptr %10 to i64
+  %12 = load ptr, ptr @"\01L_selector(setBackgroundColor:)", align 8
+  %13 = inttoptr i64 %11 to ptr
+  call void @objc_msgSend(ptr %5, ptr %12, ptr %13)
+  %14 = inttoptr i64 %11 to ptr
+  call void @llvm.objc.release(ptr %14)
+  %15 = load ptr, ptr @"\01L_selector(view)", align 8
+  %16 = call ptr @objc_msgSend(ptr %0, ptr %15)
   call void asm sideeffect "mov\09fp, fp\09\09// marker for objc_retainAutoreleaseReturnValue", ""()
-  %16 = call ptr @llvm.objc.retainAutoreleasedReturnValue(ptr %15)
-  %17 = ptrtoint ptr %16 to i64
-  call void @llvm.objc.release(ptr %0)
-  %18 = icmp eq i64 %17, 0
-  br i1 %18, label %21, label %19
+  %17 = call ptr @llvm.objc.retainAutoreleasedReturnValue(ptr %16)
+  %18 = ptrtoint ptr %17 to i64
+  %19 = icmp eq i64 %18, 0
+  br i1 %19, label %hotfix.bb.2, label %hotfix.bb.1
 
-19:
-  %20 = inttoptr i64 %17 to ptr
-  br label %22
+hotfix.bb.1:                                      ; preds = %entry
+  %20 = inttoptr i64 %18 to ptr
+  br label %hotfix.bb.3
 
-21:
-  call swiftcc void @"$ss17_assertionFailure__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF"(i64 ptrtoint (ptr @".str.11.Fatal error" to i64), i64 11, i8 2, i64 ptrtoint (ptr @".str.68.Unexpectedly found nil while implicitly unwrapping an Optional value" to i64), i64 68, i8 2, i64 ptrtoint (ptr @".str.35.ViewController/ViewController.swift" to i64), i64 35, i8 2, i64 21, i32 0)
+hotfix.bb.2:                                      ; preds = %entry
+  call swiftcc void @"$ss17_assertionFailure__4file4line5flagss5NeverOs12StaticStringV_A2HSus6UInt32VtF"(i64 ptrtoint (ptr @".str.11.Fatal error" to i64), i64 11, i8 2, i64 ptrtoint (ptr @".str.68.Unexpectedly found nil while implicitly unwrapping an Optional value" to i64), i64 68, i8 2, i64 ptrtoint (ptr @".str.25.IRHotfixPatch/Patch.swift" to i64), i64 25, i8 2, i64 7, i32 0)
   unreachable
 
-22:
-  %23 = phi ptr [ %20, %19 ]
-  %24 = load ptr, ptr @"\01L_selector(addSubview:)", align 8
-  call void @objc_msgSend(ptr %23, ptr %24, ptr %3)
-  call void @llvm.objc.release(ptr %23)
-  call void @llvm.objc.release(ptr %3)
+hotfix.bb.3:                                      ; preds = %hotfix.bb.1
+  %21 = phi ptr [ %20, %hotfix.bb.1 ]
+  %22 = load ptr, ptr @"\01L_selector(addSubview:)", align 8
+  call void @objc_msgSend(ptr %21, ptr %22, ptr %5)
+  call void @llvm.objc.release(ptr %21)
+  call void @llvm.objc.release(ptr %5)
   ret void
 }

@@ -18,6 +18,11 @@ Swift source
   -> Homebrew LLVM 19.1.7 llc -filetype=obj
   -> per-object manifest merge
   -> Xcode links the Mach-O app or test bundle
+
+Swift patch source + app Target Manifest
+  -> Apple Swift 6.2.4 swiftc -emit-bc
+  -> HotfixPatchTool ABI validation and single-function extraction
+  -> .irpatch text artifact
 ```
 
 Do not pass `libHotfixPass.dylib` to Apple `swift-frontend` with
@@ -57,10 +62,11 @@ cmake -S Tools/HotfixPass \
 cmake --build Tools/HotfixPass/.cmake-build --config Release
 ```
 
-The plugin and manifest executable are written to
+The plugin and host executables are written to
 `Tools/HotfixPass/.build/libHotfixPass.dylib` and
-`Tools/HotfixPass/.build/HotfixManifestTool`. Both build directories are
-generated and ignored by Git.
+`Tools/HotfixPass/.build/HotfixManifestTool` and
+`Tools/HotfixPass/.build/HotfixPatchTool`. Both build directories are generated
+and ignored by Git.
 
 Run the compiler-side checks after building:
 
@@ -68,6 +74,7 @@ Run the compiler-side checks after building:
 Tools/HotfixPass/Tests/run-pass-tests.sh
 Tools/HotfixPass/Tests/verify-swift-load.sh
 Tools/HotfixPass/Tests/verify-wrapper.sh
+Tools/HotfixPass/Tests/verify-patch-build.sh
 ```
 
 `run-pass-tests.sh` checks scalar and receiver classification, deterministic
@@ -77,7 +84,9 @@ rejection, fallback clones, recursion, retention, and O0/O2 pipelines.
 links two transformed modules, and exports their combined targets.
 `verify-wrapper.sh` checks object and sidecar emission, native fallback
 execution, response files, section/symbol presence, and default source
-exclusion.
+exclusion. `verify-patch-build.sh` compiles Swift patch sources and checks target
+selection, receiver and scalar ABI validation, ambiguous queries, local helper
+rejection, and single-function output.
 
 ## Xcode integration
 
@@ -336,6 +345,50 @@ object. It never writes a shared file from concurrent frontend jobs. The Xcode
 `Build Hotfix Target Manifest` phase runs after Sources and merges those
 sidecars into the Debug app bundle as `HotfixTargetManifest.json`. Release
 builds remain on the uninstrumented compiler path and do not publish a manifest.
+
+## Swift Patch Compiler
+
+Patch authors write one top-level function named `hotfixPatch`. They do not
+write a mangled symbol, target ID, signature ID, LLVM calling convention, or
+LLVM IR. A receiver target takes its object as the first Swift parameter;
+remaining parameters and the return value must match the Target Manifest's
+`i64`/`i1`/`void` ABI.
+
+The checked-in setup UI source is
+`IR/PatchSources/HotfixSetupUI.swift`. Build it against the manifest from a
+Debug app build:
+
+```bash
+Tools/HotfixPass/swift-patch-build \
+  --manifest /path/to/IR.app/HotfixTargetManifest.json \
+  --target setupUI \
+  --source IR/PatchSources/HotfixSetupUI.swift \
+  --output IR/Patches/HotfixSetupUI.irpatch
+```
+
+`--target` accepts an exact mangled symbol, hexadecimal target ID, or a unique
+symbol substring. A non-unique query fails and lists every match. The builder
+pins the Apple Swift identity, defaults to `arm64` iOS Simulator 26.2, injects a
+private fixed compiler entry, emits unoptimized bitcode, and delegates
+extraction to `HotfixPatchTool`. Use `--sdk iphoneos` for a device-targeted
+compilation and override `--arch` or `--deployment-target` when they differ from
+the app.
+
+The extractor revalidates the Manifest hashes, checks the compiled LLVM return,
+receiver, and ordered scalar parameters, assigns stable names to anonymous
+basic blocks, lowers Swift checked integer add/subtract/multiply to the VM's
+wrapping arithmetic semantics, replaces the compiler-only entry with the exact
+target symbol, and emits exactly one defined function. It rejects calls to
+non-inlined helpers defined in the Patch module; keep the first-version Patch
+implementation in the `hotfixPatch` body. Calls into UIKit, Objective-C, Swift
+runtime functions, and intrinsics remain external and are handled or explicitly
+rejected by the VM at execution time.
+
+The output is the complete text Patch consumed by
+`installAndActivate(textPatch:)`. Rebuild it whenever the matching app's
+Manifest symbol or ABI changes. After overwriting a bundled `.irpatch`, rebuild
+the app so Xcode copies the new resource; a downloaded Patch can be distributed
+without rebuilding the app.
 
 ## Debug compromises and production limits
 

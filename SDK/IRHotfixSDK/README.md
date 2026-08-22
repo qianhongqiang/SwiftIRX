@@ -100,3 +100,12 @@ SDK derives all other metadata:
 
 Supported patch ABI types are `i64`, `i1`, and `void`; a leading `ptr` is the
 optional receiver. The demo payloads under `IR/Patches` are complete examples.
+
+Application authors can generate that text from Swift instead of writing LLVM
+IR. Define exactly one top-level `func hotfixPatch(...)`, then run the host-side
+`Tools/HotfixPass/swift-patch-build` command with the built app's
+`HotfixTargetManifest.json`, a unique target query, the Swift source, and the
+output `.irpatch` path. The compiler selects the real mangled target from the
+Manifest and validates its receiver, scalar arguments, and return ABI before
+publishing the single-function Patch. `IR/PatchSources/HotfixSetupUI.swift` is
+the end-to-end UIKit example.

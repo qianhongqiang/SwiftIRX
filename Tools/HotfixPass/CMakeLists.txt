@@ -27,6 +27,15 @@ target_include_directories(
 )
 target_link_libraries(HotfixManifestTool PRIVATE LLVM)
 
+add_executable(HotfixPatchTool Sources/HotfixPatchTool.cpp)
+target_compile_features(HotfixPatchTool PRIVATE cxx_std_20)
+target_include_directories(HotfixPatchTool SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(
+  HotfixPatchTool
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+)
+target_link_libraries(HotfixPatchTool PRIVATE LLVM)
+
 set(
   HOTFIX_PASS_OUTPUT_DIRECTORY
   "${CMAKE_CURRENT_SOURCE_DIR}/.build"
@@ -44,6 +53,12 @@ set_target_properties(
 
 set_target_properties(
   HotfixManifestTool
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(
+  HotfixPatchTool
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
 )

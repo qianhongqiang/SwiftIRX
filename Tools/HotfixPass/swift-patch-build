@@ -1,0 +1,133 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SWIFTC="${IR_HOTFIX_REAL_SWIFTC:-/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc}"
+CMAKE="${IR_HOTFIX_CMAKE:-/opt/homebrew/bin/cmake}"
+PATCH_TOOL="${IR_HOTFIX_PATCH_TOOL:-$ROOT/Tools/HotfixPass/.build/HotfixPatchTool}"
+EXPECTED_SWIFT_IDENTITY="Apple Swift version 6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)"
+
+fail() {
+  echo "[SwiftPatchBuild] error: $*" >&2
+  exit 1
+}
+
+usage() {
+  echo "usage: swift-patch-build --manifest <HotfixTargetManifest.json> --target <query> --source <Patch.swift> --output <Patch.irpatch> [--sdk iphonesimulator|iphoneos] [--arch arm64] [--deployment-target 26.2]" >&2
+  exit 64
+}
+
+manifest=""
+target_query=""
+source_file=""
+output_file=""
+sdk_name="iphonesimulator"
+architecture="arm64"
+deployment_target="26.2"
+
+while (($# > 0)); do
+  case "$1" in
+    --manifest | --target | --source | --output | --sdk | --arch | --deployment-target)
+      (($# >= 2)) || usage
+      option="$1"
+      value="$2"
+      shift 2
+      case "$option" in
+        --manifest) manifest="$value" ;;
+        --target) target_query="$value" ;;
+        --source) source_file="$value" ;;
+        --output) output_file="$value" ;;
+        --sdk) sdk_name="$value" ;;
+        --arch) architecture="$value" ;;
+        --deployment-target) deployment_target="$value" ;;
+      esac
+      ;;
+    -h | --help) usage ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ -n "$manifest" && -n "$target_query" && -n "$source_file" && -n "$output_file" ]] || usage
+[[ -r "$manifest" && -f "$manifest" ]] || fail "manifest is not readable: $manifest"
+[[ -r "$source_file" && -f "$source_file" ]] || fail "Swift patch source is not readable: $source_file"
+[[ "$sdk_name" == "iphonesimulator" || "$sdk_name" == "iphoneos" ]] ||
+  fail "unsupported SDK: $sdk_name"
+[[ -x "$SWIFTC" ]] || fail "Apple Swift compiler is missing: $SWIFTC"
+
+swift_version="$($SWIFTC --version 2>/dev/null)"
+swift_identity="$(printf '%s\n' "$swift_version" | sed -n '/^Apple Swift version /p')"
+if [[ "$swift_identity" != "$EXPECTED_SWIFT_IDENTITY" ]]; then
+  fail "expected $EXPECTED_SWIFT_IDENTITY, found: $swift_identity"
+fi
+
+if [[ ! -x "$PATCH_TOOL" ]]; then
+  [[ -x "$CMAKE" ]] || fail "CMake is missing: $CMAKE"
+  "$CMAKE" \
+    -S "$ROOT/Tools/HotfixPass" \
+    -B "$ROOT/Tools/HotfixPass/.patch-tool-build" \
+    -DCMAKE_BUILD_TYPE=Release
+  "$CMAKE" \
+    --build "$ROOT/Tools/HotfixPass/.patch-tool-build" \
+    --config Release \
+    --target HotfixPatchTool
+fi
+[[ -x "$PATCH_TOOL" ]] || fail "HotfixPatchTool is missing: $PATCH_TOOL"
+
+sdk_path="$(xcrun --sdk "$sdk_name" --show-sdk-path)"
+if [[ "$sdk_name" == "iphonesimulator" ]]; then
+  swift_target="$architecture-apple-ios$deployment_target-simulator"
+else
+  swift_target="$architecture-apple-ios$deployment_target"
+fi
+
+temp="$(mktemp -d "${TMPDIR:-/tmp}/swift-hotfix-patch.XXXXXX")"
+atomic_output=""
+cleanup() {
+  find "$temp" -type f -delete
+  find "$temp" -depth -type d -empty -delete
+  if [[ -n "$atomic_output" && -e "$atomic_output" ]]; then
+    find "$atomic_output" -delete
+  fi
+}
+trap cleanup EXIT
+
+awk '
+  /^[[:space:]]*func[[:space:]]+hotfixPatch[[:space:]]*\(/ {
+    count += 1
+    print "@_silgen_name(\"__ir_hotfix_patch_entry\")"
+  }
+  { print }
+  END {
+    if (count != 1) {
+      print "[SwiftPatchBuild] error: source must define exactly one top-level func hotfixPatch(...)" > "/dev/stderr"
+      exit 1
+    }
+  }
+' "$source_file" >"$temp/Patch.swift"
+
+"$SWIFTC" \
+  -emit-bc \
+  -parse-as-library \
+  -Onone \
+  -gnone \
+  -module-name IRHotfixPatch \
+  -sdk "$sdk_path" \
+  -target "$swift_target" \
+  -module-cache-path "$temp/ModuleCache" \
+  "$temp/Patch.swift" \
+  -o "$temp/Patch.bc"
+
+output_directory="$(dirname "$output_file")"
+[[ -d "$output_directory" && -w "$output_directory" ]] ||
+  fail "patch output directory is not writable: $output_directory"
+atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").XXXXXX")"
+"$PATCH_TOOL" build \
+  "$manifest" \
+  "$target_query" \
+  "$temp/Patch.bc" \
+  "$atomic_output"
+mv -f "$atomic_output" "$output_file"
+atomic_output=""
+
+echo "[SwiftPatchBuild] wrote $output_file"
