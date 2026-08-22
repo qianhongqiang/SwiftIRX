@@ -21,6 +21,21 @@ nonisolated enum LLVMInvocationResult: Equatable, Sendable {
     case void
 }
 
+nonisolated enum LLVMIRABIValueKind: String, Equatable, Sendable {
+    case i1
+    case i8
+    case i32
+    case i64
+    case pointer = "ptr"
+    case void
+}
+
+nonisolated struct LLVMIRFunctionDescriptor: Equatable, Sendable {
+    let name: String
+    let returnKind: LLVMIRABIValueKind
+    let parameterKinds: [LLVMIRABIValueKind]
+}
+
 private nonisolated let llvmMaximumAggregateElementCount = 1_024
 
 nonisolated private func llvmStableSymbolAddress(_ symbol: String) -> Int {
@@ -62,6 +77,19 @@ nonisolated final class LLVMHostContext: @unchecked Sendable {
 }
 
 nonisolated final class LLVMIRInterpreter: Sendable {
+    static func functionDescriptors(in ir: String) throws -> [LLVMIRFunctionDescriptor] {
+        let module = try LLVMIRParser().parseModule(ir: ir)
+        return module.functions.values
+            .map { function in
+                LLVMIRFunctionDescriptor(
+                    name: function.name,
+                    returnKind: function.returnType.patchABIKind,
+                    parameterKinds: function.parameters.map { $0.type.patchABIKind }
+                )
+            }
+            .sorted { $0.name < $1.name }
+    }
+
     func run(
         ir: String,
         function name: String,
@@ -1092,6 +1120,21 @@ private nonisolated enum LLVMType {
     case i64
     case i1
     case ptr
+
+    var patchABIKind: LLVMIRABIValueKind {
+        switch self {
+        case .i1:
+            return .i1
+        case .i8:
+            return .i8
+        case .i32:
+            return .i32
+        case .i64:
+            return .i64
+        case .ptr:
+            return .pointer
+        }
+    }
 }
 
 private nonisolated enum LLVMICmpPredicate: String {
@@ -1153,6 +1196,15 @@ private nonisolated enum LLVMFunctionReturnType {
             return true
         default:
             return false
+        }
+    }
+
+    var patchABIKind: LLVMIRABIValueKind {
+        switch self {
+        case .void:
+            return .void
+        case let .type(type):
+            return type.patchABIKind
         }
     }
 }

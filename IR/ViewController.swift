@@ -22,52 +22,28 @@ class ViewController: UIViewController {
 
     private func runHotfixDemo() {
         let manager = HotfixManager.shared
-        manager.deactivatePatch(for: HotfixDemoABI.addTargetID)
-        manager.deactivatePatch(for: HotfixDemoABI.multiplyTargetID)
-
         let calculator = HotfixableCalculator()
         print("Hotfix demo native: add=\(hotfixableAdd(41)), multiply=\(calculator.multiply(21))")
 
-        let addPatch = HotfixPatch(
-            id: "demo.add.v1",
-            targetID: HotfixDemoABI.addTargetID,
-            signatureID: HotfixDemoABI.addSignatureID,
-            entryFunction: "patch",
-            ir: """
-            define i64 @patch(i64 %value) {
-            entry:
-              %result = add i64 %value, 10
-              ret i64 %result
-            }
-            """
-        )
-        let multiplyPatch = HotfixPatch(
-            id: "demo.multiply.v1",
-            targetID: HotfixDemoABI.multiplyTargetID,
-            signatureID: HotfixDemoABI.multiplySignatureID,
-            entryFunction: "patch",
-            ir: """
-            define i64 @patch(ptr %self, i64 %value) {
-            entry:
-              %result = add i64 %value, 100
-              ret i64 %result
-            }
-            """
-        )
-
+        var activations: [HotfixActivation] = []
         do {
-            manager.upsert(addPatch)
-            manager.upsert(multiplyPatch)
-            try manager.activatePatch(id: addPatch.id)
-            try manager.activatePatch(id: multiplyPatch.id)
+            for resourceName in ["HotfixAdd", "HotfixMultiply"] {
+                guard let url = Bundle.main.url(forResource: resourceName, withExtension: "irpatch") else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                let textPatch = try String(contentsOf: url, encoding: .utf8)
+                activations.append(try manager.installAndActivate(textPatch: textPatch))
+            }
             defer {
-                manager.deactivatePatch(for: addPatch.targetID)
-                manager.deactivatePatch(for: multiplyPatch.targetID)
+                for activation in activations {
+                    manager.deactivate(activation)
+                }
             }
             print("Hotfix demo patched: add=\(hotfixableAdd(41)), multiply=\(calculator.multiply(21))")
         } catch {
-            manager.deactivatePatch(for: addPatch.targetID)
-            manager.deactivatePatch(for: multiplyPatch.targetID)
+            for activation in activations {
+                manager.deactivate(activation)
+            }
             print("Hotfix demo error: \(error)")
         }
     }

@@ -53,25 +53,19 @@ struct IRTests {
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer { userDefaults.removePersistentDomain(forName: suiteName) }
         let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
-        let patch = HotfixPatch(
-            id: "patch.app.add",
-            targetID: HotfixDemoABI.addTargetID,
-            signatureID: HotfixDemoABI.addSignatureID,
-            entryFunction: "patch",
-            ir: """
-            define i64 @patch(i64 %value) {
+        let textPatch = """
+            define i64 @"$s2IR13hotfixableAddyS2iF"(i64 %value) {
             entry:
               %result = add i64 %value, 10
               ret i64 %result
             }
             """
-        )
         let runtime = HotfixRuntime(manager: manager)
 
         try HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
             #expect(hotfixableAdd(41) == 42)
-            manager.upsert(patch)
-            try manager.activatePatch(id: patch.id)
+            let activation = try manager.installAndActivate(textPatch: textPatch)
+            defer { manager.deactivate(activation) }
             #expect(hotfixableAdd(41) == 51)
         }
     }
@@ -81,27 +75,61 @@ struct IRTests {
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer { userDefaults.removePersistentDomain(forName: suiteName) }
         let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
-        let patch = HotfixPatch(
-            id: "patch.app.multiply",
-            targetID: HotfixDemoABI.multiplyTargetID,
-            signatureID: HotfixDemoABI.multiplySignatureID,
-            entryFunction: "patch",
-            ir: """
-            define i64 @patch(ptr %self, i64 %value) {
+        let textPatch = """
+            define i64 @"$s2IR20HotfixableCalculatorC8multiplyyS2iF"(ptr %self, i64 %value) {
             entry:
               %result = add i64 %value, 100
               ret i64 %result
             }
             """
-        )
         let runtime = HotfixRuntime(manager: manager)
         let calculator = HotfixableCalculator()
 
         try HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
             #expect(calculator.multiply(21) == 42)
-            manager.upsert(patch)
-            try manager.activatePatch(id: patch.id)
+            let activation = try manager.installAndActivate(textPatch: textPatch)
+            defer { manager.deactivate(activation) }
             #expect(calculator.multiply(21) == 121)
+        }
+    }
+
+    @Test func textPatchDerivesMetadataFromDefinedFunction() throws {
+        let symbol = "$s4Demo8replaceyS2iF"
+        let textPatch = """
+        define i64 @"\(symbol)"(ptr %self, i64 %value, i1 %enabled) {
+        entry:
+          ret i64 %value
+        }
+        """
+
+        let patch = try HotfixPatch(text: textPatch)
+
+        #expect(patch.targetID == HotfixID.fnv1a64(symbol))
+        #expect(
+            patch.signatureID == HotfixID.signature(
+                returnKind: .int,
+                argumentKinds: [.int, .bool],
+                hasReceiver: true
+            )
+        )
+        #expect(patch.entryFunction == symbol)
+        #expect(patch.id.hasPrefix("text."))
+    }
+
+    @Test func textPatchRejectsMultipleDefinedFunctions() {
+        let textPatch = """
+        define i64 @first(i64 %value) {
+        entry:
+          ret i64 %value
+        }
+        define i64 @second(i64 %value) {
+        entry:
+          ret i64 %value
+        }
+        """
+
+        #expect(throws: HotfixTextPatchError.expectedSingleFunction(actualCount: 2)) {
+            try HotfixPatch(text: textPatch)
         }
     }
 

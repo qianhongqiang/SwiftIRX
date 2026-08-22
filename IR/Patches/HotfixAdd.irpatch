@@ -1,0 +1,5 @@
+define i64 @"$s2IR13hotfixableAddyS2iF"(i64 %value) {
+entry:
+  %result = add i64 %value, 10
+  ret i64 %result
+}

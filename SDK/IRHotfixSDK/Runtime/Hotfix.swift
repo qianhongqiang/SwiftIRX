@@ -4,6 +4,25 @@ nonisolated enum HotfixError: Error, Equatable, Sendable {
     case patchNotFound(String)
 }
 
+nonisolated enum HotfixTextPatchError: Error, Equatable, Sendable {
+    case expectedSingleFunction(actualCount: Int)
+    case unsupportedReturnType(LLVMIRABIValueKind)
+    case unsupportedParameterType(index: Int, kind: LLVMIRABIValueKind)
+}
+
+extension HotfixTextPatchError: LocalizedError {
+    nonisolated var errorDescription: String? {
+        switch self {
+        case let .expectedSingleFunction(actualCount):
+            return "A text patch must contain exactly one defined function; found \(actualCount)."
+        case let .unsupportedReturnType(kind):
+            return "Text patch return type \(kind.rawValue) is unsupported."
+        case let .unsupportedParameterType(index, kind):
+            return "Text patch parameter \(index) has unsupported type \(kind.rawValue)."
+        }
+    }
+}
+
 nonisolated enum HotfixValueKind: UInt8, Codable, Sendable {
     case int = 1
     case bool = 2
@@ -64,6 +83,54 @@ nonisolated struct HotfixPatch: Codable, Equatable, Sendable {
         self.ir = ir
     }
 
+    init(text: String) throws {
+        let descriptors = try LLVMIRInterpreter.functionDescriptors(in: text)
+        guard descriptors.count == 1, let descriptor = descriptors.first else {
+            throw HotfixTextPatchError.expectedSingleFunction(actualCount: descriptors.count)
+        }
+
+        let returnKind: HotfixValueKind
+        switch descriptor.returnKind {
+        case .i64:
+            returnKind = .int
+        case .i1:
+            returnKind = .bool
+        case .void:
+            returnKind = .void
+        case .i8, .i32, .pointer:
+            throw HotfixTextPatchError.unsupportedReturnType(descriptor.returnKind)
+        }
+
+        var parameters = descriptor.parameterKinds
+        let hasReceiver = parameters.first == .pointer
+        if hasReceiver {
+            parameters.removeFirst()
+        }
+
+        let argumentKinds = try parameters.enumerated().map { index, kind in
+            switch kind {
+            case .i64:
+                return HotfixValueKind.int
+            case .i1:
+                return HotfixValueKind.bool
+            case .i8, .i32, .pointer, .void:
+                throw HotfixTextPatchError.unsupportedParameterType(index: index, kind: kind)
+            }
+        }
+
+        self.init(
+            id: "text.\(String(HotfixID.fnv1a64(text), radix: 16))",
+            targetID: HotfixID.fnv1a64(descriptor.name),
+            signatureID: HotfixID.signature(
+                returnKind: returnKind,
+                argumentKinds: argumentKinds,
+                hasReceiver: hasReceiver
+            ),
+            entryFunction: descriptor.name,
+            ir: text
+        )
+    }
+
     // Legacy runMain patches use an integer result with no arguments or receiver.
     init(id: String, patchPoint: String, ir: String) {
         self.init(
@@ -78,6 +145,11 @@ nonisolated struct HotfixPatch: Codable, Equatable, Sendable {
             ir: ir
         )
     }
+}
+
+nonisolated struct HotfixActivation: Equatable, Sendable {
+    fileprivate let targetID: UInt64
+    fileprivate let patchID: String
 }
 
 private nonisolated struct HotfixState: Codable, Sendable {
@@ -134,6 +206,35 @@ nonisolated final class HotfixManager: @unchecked Sendable {
         }
         var candidate = state
         candidate.activePatchIDByTarget[patch.targetID] = patch.id
+        publish(candidate)
+    }
+
+    @discardableResult
+    func installAndActivate(textPatch: String) throws -> HotfixActivation {
+        let patch = try HotfixPatch(text: textPatch)
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var candidate = state
+        candidate.activePatchIDByTarget = candidate.activePatchIDByTarget.filter {
+            $0.value != patch.id
+        }
+        candidate.patchesByID[patch.id] = patch
+        candidate.activePatchIDByTarget[patch.targetID] = patch.id
+        publish(candidate)
+        return HotfixActivation(targetID: patch.targetID, patchID: patch.id)
+    }
+
+    func deactivate(_ activation: HotfixActivation) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard state.activePatchIDByTarget[activation.targetID] == activation.patchID else {
+            return
+        }
+        var candidate = state
+        candidate.activePatchIDByTarget.removeValue(forKey: activation.targetID)
         publish(candidate)
     }
 

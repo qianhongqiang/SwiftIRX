@@ -31,3 +31,26 @@ IRHotfixSDK/
 App-facing demo code stays under `IR/`. Compiler instrumentation stays under
 `Tools/HotfixPass` because it is a macOS host build tool rather than an iOS
 runtime SDK component.
+
+## Text patch input
+
+Application code installs a patch from text and keeps only the opaque activation
+token:
+
+```swift
+let text = try String(contentsOf: patchURL, encoding: .utf8)
+let activation = try HotfixManager.shared.installAndActivate(textPatch: text)
+defer { HotfixManager.shared.deactivate(activation) }
+```
+
+The text must currently contain exactly one defined LLVM function. That
+function's name is the target symbol and its body is the interpreter entry. The
+SDK derives all other metadata:
+
+- `targetID` from the function name;
+- `signatureID` from the return and parameter types;
+- receiver presence from a leading `ptr` parameter;
+- `patchID` from the complete text payload.
+
+Supported patch ABI types are `i64`, `i1`, and `void`; a leading `ptr` is the
+optional receiver. The demo payloads under `IR/Patches` are complete examples.
