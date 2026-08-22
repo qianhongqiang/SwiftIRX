@@ -910,6 +910,35 @@ struct IRTests {
         #expect(viewController.view.subviews.first?.backgroundColor == UIColor.red)
     }
 
+    @MainActor
+    @Test func installSetupUIFromBundledTextPatch() throws {
+        guard let patchURL = Bundle.main.url(forResource: "HotfixSetupUI", withExtension: "irpatch") else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let textPatch = try String(contentsOf: patchURL, encoding: .utf8)
+        let patch = try HotfixPatch(text: textPatch)
+        let suiteName = "ir.hotfix.setup-ui.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let activation = try manager.installAndActivate(textPatch: textPatch)
+        defer { manager.deactivate(activation) }
+        let viewController = UIViewController()
+        _ = viewController.view
+
+        let result = HotfixRuntime(manager: manager).invoke(
+            targetID: patch.targetID,
+            signatureID: patch.signatureID,
+            arguments: [],
+            receiver: viewController
+        )
+
+        #expect(result == .void)
+        #expect(viewController.view.subviews.count == 1)
+        #expect(viewController.view.subviews.first?.frame == CGRect(x: 0, y: 0, width: 100, height: 100))
+        #expect(viewController.view.subviews.first?.backgroundColor == UIColor.red)
+    }
+
     @Test func hotfixExecutorUsesActivePatch() throws {
         let userDefaults = UserDefaults(suiteName: "ir.hotfix.tests.\(UUID().uuidString)")!
         let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")

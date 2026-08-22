@@ -113,7 +113,7 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
 
 With the Swift Testing framework used here, XCTest-style method selectors can
 quietly select zero tests. Confirm a nonzero `totalTestCount` in the generated
-`.xcresult`; the target-level command above currently runs 62 unit tests.
+`.xcresult`; the target-level command above currently runs 63 unit tests.
 
 The full command is:
 
