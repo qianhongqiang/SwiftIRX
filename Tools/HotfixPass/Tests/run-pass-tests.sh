@@ -4,7 +4,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
+TARGET_MANIFEST_TOOL="$ROOT/Tools/HotfixPass/.build/HotfixManifestTool"
 FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/scalars.ll"
+TARGET_MANIFEST_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest.ll"
+TARGET_MANIFEST_EXPECTED="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest.json"
+TARGET_MANIFEST_INVALID_ABI="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest_invalid_abi.ll"
+TARGET_MANIFEST_CONFLICT="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest_conflict.json"
 SWIFT_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
 ACTOR_LIBRARY_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/actor_library.swift"
 ACTOR_EXTENSION_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/actor_extension.swift"
@@ -25,11 +30,57 @@ if [[ ! -f "$PLUGIN" ]]; then
   echo "error: pass plugin not found at $PLUGIN" >&2
   exit 1
 fi
+if [[ ! -x "$TARGET_MANIFEST_TOOL" ]]; then
+  echo "error: target manifest tool not found at $TARGET_MANIFEST_TOOL" >&2
+  exit 1
+fi
 
 if [[ ! -x "$MANIFEST_GENERATOR" ]]; then
   echo "error: receiver manifest generator not found at $MANIFEST_GENERATOR" >&2
   exit 1
 fi
+
+"$TARGET_MANIFEST_TOOL" extract \
+  "$TEMP/targets.json" \
+  "$TARGET_MANIFEST_FIXTURE"
+if ! cmp -s "$TARGET_MANIFEST_EXPECTED" "$TEMP/targets.json"; then
+  echo "error: extracted target manifest differs from expected output" >&2
+  diff -u "$TARGET_MANIFEST_EXPECTED" "$TEMP/targets.json" >&2 || true
+  exit 1
+fi
+"$TARGET_MANIFEST_TOOL" merge \
+  "$TEMP/merged-targets.json" \
+  "$TEMP/targets.json" \
+  "$TEMP/targets.json"
+if ! cmp -s "$TARGET_MANIFEST_EXPECTED" "$TEMP/merged-targets.json"; then
+  echo "error: target manifest merge was not deterministic or deduplicated" >&2
+  exit 1
+fi
+if "$TARGET_MANIFEST_TOOL" extract \
+  "$TEMP/invalid-abi.json" \
+  "$TARGET_MANIFEST_INVALID_ABI" \
+  2>"$TEMP/invalid-abi.stderr"; then
+  echo "error: target manifest tool accepted an incompatible ABI" >&2
+  exit 1
+fi
+grep -Fq 'uses an unsupported ABI version' "$TEMP/invalid-abi.stderr"
+if "$TARGET_MANIFEST_TOOL" merge \
+  "$TEMP/conflicting-targets.json" \
+  "$TEMP/targets.json" \
+  "$TARGET_MANIFEST_CONFLICT" \
+  2>"$TEMP/conflicting-targets.stderr"; then
+  echo "error: target manifest tool accepted a target ID collision" >&2
+  exit 1
+fi
+grep -Fq 'target ID collision' "$TEMP/conflicting-targets.stderr"
+if "$TARGET_MANIFEST_TOOL" extract \
+  "$TEMP/missing-target.json" \
+  "$TEMP/missing-target.bc" \
+  2>"$TEMP/missing-target.stderr"; then
+  echo "error: target manifest tool accepted a missing input" >&2
+  exit 1
+fi
+grep -Fq 'cannot read LLVM module' "$TEMP/missing-target.stderr"
 
 find_swift_symbol() {
   local demangled_fragment="$1"

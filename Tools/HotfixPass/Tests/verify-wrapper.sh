@@ -53,6 +53,9 @@ grep -qx '42' "$TEMP/native-output.txt"
 grep -Fq 'wrapperAdd' "$TEMP/scalar-symbols.txt"
 grep -Fq '.hotfix_original' "$TEMP/scalar-symbols.txt"
 grep -Fq '_hf_vm_invoke' "$TEMP/scalar-symbols.txt"
+test -f "$TEMP/wrapper_scalar.o.hotfix-targets.json"
+grep -Fq '"schemaVersion": 1' "$TEMP/wrapper_scalar.o.hotfix-targets.json"
+grep -Fq 'wrapperAdd' "$TEMP/wrapper_scalar.o.hotfix-targets.json"
 "$LLVM_ROOT/llvm-objdump" --macho --section-headers \
   "$TEMP/wrapper_scalar.o" >"$TEMP/scalar-sections.txt"
 grep -Fq '__hotfix' "$TEMP/scalar-sections.txt"
@@ -85,6 +88,8 @@ printf '%s\n' '@"responses/compile args.rsp"' \
   >"$TEMP/response-symbols.txt"
 grep -Fq '.hotfix_original' "$TEMP/response-symbols.txt"
 grep -Fq '_hf_vm_invoke' "$TEMP/response-symbols.txt"
+test -f "$TEMP/response object.o.hotfix-targets.json"
+grep -Fq 'wrapperAdd' "$TEMP/response object.o.hotfix-targets.json"
 "$LLVM_ROOT/llvm-objdump" --macho --section-headers \
   "$TEMP/response object.o" >"$TEMP/response-sections.txt"
 grep -Fq '__hotfix' "$TEMP/response-sections.txt"
@@ -123,6 +128,10 @@ IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
 grep -Fq 'excludedAdd' "$TEMP/excluded-symbols.txt"
 if grep -Fq '.hotfix_original' "$TEMP/excluded-symbols.txt"; then
   echo "error: excluded Hotfix.swift was instrumented" >&2
+  exit 1
+fi
+if [[ -e "$TEMP/Hotfix.o.hotfix-targets.json" ]]; then
+  echo "error: excluded Hotfix.swift emitted a target manifest" >&2
   exit 1
 fi
 if "$LLVM_ROOT/llvm-objdump" --macho --section-headers "$TEMP/Hotfix.o" |

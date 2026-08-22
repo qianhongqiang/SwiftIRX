@@ -14,7 +14,9 @@ Swift source
   -> Apple Swift 6.2.4 swift-frontend -emit-bc
   -> llvm-nm + swift-demangle receiver manifest
   -> Homebrew LLVM 19.1.7 opt + libHotfixPass.dylib
+  -> HotfixManifestTool descriptor extraction
   -> Homebrew LLVM 19.1.7 llc -filetype=obj
+  -> per-object manifest merge
   -> Xcode links the Mach-O app or test bundle
 ```
 
@@ -55,8 +57,9 @@ cmake -S Tools/HotfixPass \
 cmake --build Tools/HotfixPass/.cmake-build --config Release
 ```
 
-The plugin is written to
-`Tools/HotfixPass/.build/libHotfixPass.dylib`. Both build directories are
+The plugin and manifest executable are written to
+`Tools/HotfixPass/.build/libHotfixPass.dylib` and
+`Tools/HotfixPass/.build/HotfixManifestTool`. Both build directories are
 generated and ignored by Git.
 
 Run the compiler-side checks after building:
@@ -68,11 +71,13 @@ Tools/HotfixPass/Tests/verify-wrapper.sh
 ```
 
 `run-pass-tests.sh` checks scalar and receiver classification, deterministic
-skip diagnostics, descriptors, fallback clones, recursion, retention, and O0/O2
-pipelines. `verify-swift-load.sh` crosses the real Apple-bitcode/Homebrew-LLVM
-boundary and links two transformed modules. `verify-wrapper.sh` checks object
-emission, native fallback execution, response files, section/symbol presence,
-and default source exclusion.
+skip diagnostics, descriptor extraction and manifest merging, collision
+rejection, fallback clones, recursion, retention, and O0/O2 pipelines.
+`verify-swift-load.sh` crosses the real Apple-bitcode/Homebrew-LLVM boundary,
+links two transformed modules, and exports their combined targets.
+`verify-wrapper.sh` checks object and sidecar emission, native fallback
+execution, response files, section/symbol presence, and default source
+exclusion.
 
 ## Xcode integration
 
@@ -88,9 +93,9 @@ identifies the primary source and output. Quoting, nested files, paths containin
 spaces, missing files, and cycles are covered by the wrapper test. Relative
 response paths are resolved from the frontend process's working directory.
 
-The Debug build phase hashes `CMakeLists.txt`, `HotfixPass.cpp`, the public
-`SDK/IRHotfixSDK/ABI` headers, the receiver manifest generator, and the wrapper into
-`HotfixInstrumentationStamp.h`. A changed tool fingerprint changes this
+The Debug build phase hashes `CMakeLists.txt`, both C++ tool sources, the public
+`SDK/IRHotfixSDK/ABI` headers, the receiver manifest generator, and the wrapper
+into `HotfixInstrumentationStamp.h`. A changed tool fingerprint changes this
 bridging-header input and invalidates all app Swift objects. When the hash is
 unchanged, the build phase preserves the stamp timestamp so an incremental
 no-op remains incremental. Response-file contents still participate through
@@ -112,7 +117,7 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
 
 With the Swift Testing framework used here, XCTest-style method selectors can
 quietly select zero tests. Confirm a nonzero `totalTestCount` in the generated
-`.xcresult`; the target-level command above currently runs 65 unit tests.
+`.xcresult`; the target-level command above currently runs 66 unit tests.
 
 The full command is:
 
@@ -306,9 +311,31 @@ every eligible function into Mach-O `__DATA,__hotfix`. Its fixed LLVM layout is:
 The ordered kinds are 32-bit `HFValueKind` entries. Current instrumented values
 use `1 = i64`, `2 = i1`, and return-only `3 = void`; descriptor flag bit zero
 is set when the function has a receiver. The trampoline also embeds both IDs
-directly, so invocation does not depend on scanning the section. This repository currently
-verifies the section with `llvm-objdump` and IR fixtures; it does not ship a
-descriptor exporter or runtime duplicate-ID scanner.
+directly, so invocation does not depend on scanning the section.
+
+## Target Manifest generation
+
+`HotfixManifestTool` reads the versioned `HFDescriptor` globals from transformed
+LLVM IR or bitcode. It does not independently infer Swift signatures. Its two
+commands are:
+
+```bash
+HotfixManifestTool extract output.json transformed.bc
+HotfixManifestTool merge output.json first.json second.json
+```
+
+`extract` verifies the descriptor layout, value kinds, argument limit,
+`targetID`, and canonical `signatureID`. `merge` revalidates every input,
+deduplicates identical targets, rejects target-ID collisions, and writes stable
+symbol-sorted JSON. Both IDs use `0x` plus exactly 16 lowercase hexadecimal
+digits so tools that represent JSON numbers as IEEE-754 doubles cannot truncate
+them.
+
+The compiler wrapper writes `<object>.hotfix-targets.json` beside each generated
+object. It never writes a shared file from concurrent frontend jobs. The Xcode
+`Build Hotfix Target Manifest` phase runs after Sources and merges those
+sidecars into the Debug app bundle as `HotfixTargetManifest.json`. Release
+builds remain on the uninstrumented compiler path and do not publish a manifest.
 
 ## Debug compromises and production limits
 

@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PLUGIN="$ROOT/Tools/HotfixPass/.build/libHotfixPass.dylib"
+TARGET_MANIFEST_TOOL="$ROOT/Tools/HotfixPass/.build/HotfixManifestTool"
 FIRST_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture.swift"
 SECOND_FIXTURE="$ROOT/Tools/HotfixPass/Tests/fixtures/swift_fixture_second.swift"
 MANIFEST_GENERATOR="$ROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh"
@@ -34,6 +35,10 @@ fi
 
 if [[ ! -f "$PLUGIN" ]]; then
   echo "error: pass plugin not found at $PLUGIN" >&2
+  exit 1
+fi
+if [[ ! -x "$TARGET_MANIFEST_TOOL" ]]; then
+  echo "error: target manifest tool not found at $TARGET_MANIFEST_TOOL" >&2
   exit 1
 fi
 if [[ ! -x "$MANIFEST_GENERATOR" ]]; then
@@ -87,6 +92,12 @@ grep -Eq '^define private swiftcc i64 .*instanceTarget.*\.hotfix_original' \
   "$TEMP/first.transformed.bc" \
   "$TEMP/second.transformed.bc" \
   -o "$TEMP/linked.bc"
+
+"$TARGET_MANIFEST_TOOL" extract \
+  "$TEMP/linked-targets.json" \
+  "$TEMP/linked.bc"
+grep -Fq 'HotfixFixtureOne' "$TEMP/linked-targets.json"
+grep -Fq 'HotfixFixtureTwo' "$TEMP/linked-targets.json"
 
 "$LLVM_ROOT/llvm-dis" \
   "$TEMP/linked.bc" \

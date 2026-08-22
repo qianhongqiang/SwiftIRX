@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "abiVersion": 1,
+  "targets": [
+    {
+      "symbol": "instanceTarget",
+      "targetID": "0x4eaa70cef627ccb3",
+      "signatureID": "0xa41bde07a2f1202e",
+      "returnKind": "i64",
+      "argumentKinds": [
+        "i64"
+      ],
+      "hasReceiver": true
+    },
+    {
+      "symbol": "integerTarget",
+      "targetID": "0x37465577a37332e8",
+      "signatureID": "0xa41bdf07a2f121e1",
+      "returnKind": "i64",
+      "argumentKinds": [
+        "i64"
+      ],
+      "hasReceiver": false
+    }
+  ]
+}

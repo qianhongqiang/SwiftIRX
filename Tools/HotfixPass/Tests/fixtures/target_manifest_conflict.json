@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "abiVersion": 1,
+  "targets": [
+    {
+      "symbol": "integerTarget",
+      "targetID": "0x37465577a37332e8",
+      "signatureID": "0xa41bde07a2f1202e",
+      "returnKind": "i64",
+      "argumentKinds": [
+        "i64"
+      ],
+      "hasReceiver": true
+    }
+  ]
+}

@@ -1215,6 +1215,47 @@ struct IRTests {
         #expect(MemoryLayout<HFDescriptor>.size == 56)
     }
 
+    @Test func bundledTargetManifestContainsInstrumentedDemoTargets() throws {
+        let url = try #require(
+            Bundle.main.url(
+                forResource: HotfixTargetManifest.resourceName,
+                withExtension: "json"
+            )
+        )
+        let manifest = try JSONDecoder().decode(
+            HotfixTargetManifest.self,
+            from: Data(contentsOf: url)
+        )
+
+        #expect(manifest.schemaVersion == HotfixTargetManifest.supportedSchemaVersion)
+        #expect(manifest.abiVersion == HotfixABI.version)
+
+        let addSymbol = "$s2IR13hotfixableAddyS2iF"
+        let add = try #require(manifest.target(symbol: addSymbol))
+        #expect(add.targetIDValue == HotfixID.fnv1a64(addSymbol))
+        #expect(add.signatureIDValue == HotfixID.signature(
+            returnKind: .int,
+            argumentKinds: [.int],
+            hasReceiver: false
+        ))
+        #expect(add.returnKind == .int)
+        #expect(add.argumentKinds == [.int])
+        #expect(!add.hasReceiver)
+
+        let multiplySymbol = "$s2IR20HotfixableCalculatorC8multiplyyS2iF"
+        let multiply = try #require(manifest.target(symbol: multiplySymbol))
+        #expect(multiply.returnKind == .int)
+        #expect(multiply.argumentKinds == [.int])
+        #expect(multiply.hasReceiver)
+
+        #expect(manifest.targets.contains {
+            $0.symbol.contains("ViewControllerC7setupUI") &&
+                $0.returnKind == .void &&
+                $0.argumentKinds.isEmpty &&
+                $0.hasReceiver
+        })
+    }
+
     @Test func frameGatewayValidatesInvokesAndEncodesResult() throws {
         let suiteName = "ir.hotfix.frame.tests.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!

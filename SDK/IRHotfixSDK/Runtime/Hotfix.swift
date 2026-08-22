@@ -55,6 +55,49 @@ nonisolated enum HotfixABI {
     static let borrowedHandleFlags = UInt16(HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress)
 }
 
+nonisolated enum HotfixTargetValueKind: String, Codable, Sendable {
+    case int = "i64"
+    case bool = "i1"
+    case void
+}
+
+nonisolated struct HotfixTargetDescriptor: Codable, Equatable, Sendable {
+    let symbol: String
+    let targetID: String
+    let signatureID: String
+    let returnKind: HotfixTargetValueKind
+    let argumentKinds: [HotfixTargetValueKind]
+    let hasReceiver: Bool
+
+    var targetIDValue: UInt64? {
+        Self.decodeHexID(targetID)
+    }
+
+    var signatureIDValue: UInt64? {
+        Self.decodeHexID(signatureID)
+    }
+
+    private static func decodeHexID(_ value: String) -> UInt64? {
+        guard value.count == 18, value.hasPrefix("0x") else {
+            return nil
+        }
+        return UInt64(value.dropFirst(2), radix: 16)
+    }
+}
+
+nonisolated struct HotfixTargetManifest: Codable, Equatable, Sendable {
+    static let supportedSchemaVersion: UInt32 = 1
+    static let resourceName = "HotfixTargetManifest"
+
+    let schemaVersion: UInt32
+    let abiVersion: UInt32
+    let targets: [HotfixTargetDescriptor]
+
+    func target(symbol: String) -> HotfixTargetDescriptor? {
+        targets.first { $0.symbol == symbol }
+    }
+}
+
 nonisolated enum HotfixID {
     static func fnv1a64(_ value: String) -> UInt64 {
         value.utf8.reduce(14_695_981_039_346_656_037) { hash, byte in

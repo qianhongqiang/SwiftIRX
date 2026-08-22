@@ -27,7 +27,8 @@ IRHotfixSDK/
   the sole invocation envelope; its embedded `HFHandle` and `HFValue` fields
   do not expose Swift or Objective-C object layouts.
 - `Runtime/Hotfix.swift` contains the patch registry, execution entry points,
-  fallback behavior, and the `hf_vm_invoke(HFPatchFrame *)` implementation.
+  fallback behavior, the `hf_vm_invoke(HFPatchFrame *)` implementation, and
+  the Codable Target Manifest model.
 - `Runtime/LLVMIRInterpreter.swift` parses and executes the supported LLVM IR
   subset and owns structured host handles for objects, selectors, and classes.
 - `Bridge/IRHotfixObjCBridge.h` exposes a stable C ABI to Swift and future VM
@@ -52,6 +53,26 @@ changing `HFPatchFrame` layout.
 
 `ir_hotfix_invoke` remains only as a compatibility adapter for existing callers;
 new compiler output calls `hf_vm_invoke` directly.
+
+## Target Manifest
+
+Debug instrumentation generates one descriptor-derived sidecar manifest for
+each Swift object. After the target's Sources phase, Xcode merges those files
+into `HotfixTargetManifest.json` in the app bundle. The JSON root contains
+`schemaVersion`, `abiVersion`, and a deterministic symbol-sorted `targets`
+array. Each target records:
+
+- the exact mangled LLVM symbol;
+- `targetID` and `signatureID` as 16-digit hexadecimal strings prefixed by
+  `0x`, avoiding loss of 64-bit precision in JSON consumers;
+- the return kind and ordered argument kinds;
+- whether the function has a receiver.
+
+`HotfixTargetManifest` decodes the bundle resource, while
+`HotfixTargetDescriptor.targetIDValue` and `signatureIDValue` expose checked
+`UInt64` views of the stored IDs. The generator validates the C ABI version,
+descriptor size and flags, argument count, both FNV-1a hashes, and duplicate ID
+collisions before publishing output.
 
 App-facing demo code stays under `IR/`. Compiler instrumentation stays under
 `Tools/HotfixPass` because it is a macOS host build tool rather than an iOS

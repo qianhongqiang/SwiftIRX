@@ -18,6 +18,15 @@ target_include_directories(
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
 )
 
+add_executable(HotfixManifestTool Sources/HotfixManifestTool.cpp)
+target_compile_features(HotfixManifestTool PRIVATE cxx_std_20)
+target_include_directories(HotfixManifestTool SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(
+  HotfixManifestTool
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+)
+target_link_libraries(HotfixManifestTool PRIVATE LLVM)
+
 set(
   HOTFIX_PASS_OUTPUT_DIRECTORY
   "${CMAKE_CURRENT_SOURCE_DIR}/.build"
@@ -31,6 +40,12 @@ set_target_properties(
     PREFIX "lib"
     SUFFIX ".dylib"
     LIBRARY_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(
+  HotfixManifestTool
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
 )
 
 if(APPLE)

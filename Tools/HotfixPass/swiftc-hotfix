@@ -239,6 +239,10 @@ fi
 case "$(basename "$primary_file")" in
   Hotfix.swift | LLVMIRInterpreter.swift)
     diagnose "forwarding excluded source: $primary_file"
+    sidecar="$output_file.hotfix-targets.json"
+    if [[ -f "$sidecar" ]]; then
+      find "$sidecar" -delete
+    fi
     exec "$REAL_FRONTEND" "${arguments[@]}"
     ;;
 esac
@@ -275,14 +279,21 @@ if [[ -z "$plugin" ]]; then
   plugin="$derived_file_dir/HotfixPassProduct/libHotfixPass.dylib"
 fi
 [[ -r "$plugin" && -f "$plugin" ]] || fail "pass plugin is not readable: $plugin"
+target_manifest_tool="${IR_HOTFIX_TARGET_MANIFEST_TOOL:-$(dirname "$plugin")/HotfixManifestTool}"
+[[ -x "$target_manifest_tool" ]] ||
+  fail "target manifest tool is not executable: $target_manifest_tool"
 
 temp="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-swiftc.XXXXXX")"
 atomic_output=""
+atomic_manifest=""
 cleanup() {
   find "$temp" -type f -delete
   find "$temp" -depth -type d -empty -delete
   if [[ -n "$atomic_output" && -e "$atomic_output" ]]; then
     find "$atomic_output" -delete
+  fi
+  if [[ -n "$atomic_manifest" && -e "$atomic_manifest" ]]; then
+    find "$atomic_manifest" -delete
   fi
 }
 trap cleanup EXIT
@@ -329,6 +340,12 @@ output_directory="$(dirname "$output_file")"
 [[ -d "$output_directory" && -w "$output_directory" ]] ||
   fail "object output directory is not writable: $output_directory"
 atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").hotfix.XXXXXX")"
+atomic_manifest="$(
+  mktemp "$output_directory/.$(basename "$output_file").hotfix-targets.XXXXXX"
+)"
+"$target_manifest_tool" extract \
+  "$atomic_manifest" \
+  "$temp/transformed.bc"
 "$LLC" \
   -filetype=obj \
   -O0 \
@@ -337,3 +354,5 @@ atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").hotfix.XX
   -o "$atomic_output"
 mv -f "$atomic_output" "$output_file"
 atomic_output=""
+mv -f "$atomic_manifest" "$output_file.hotfix-targets.json"
+atomic_manifest=""
