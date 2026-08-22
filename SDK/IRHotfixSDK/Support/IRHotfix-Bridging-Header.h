@@ -2,4 +2,4 @@
 #include "HotfixInstrumentationStamp.h"
 #endif
 
-#include "../SDK/IRHotfixSDK/IRHotfixObjCBridge.h"
+#include "../Bridge/IRHotfixObjCBridge.h"

@@ -1,7 +1,7 @@
 #import <UIKit/UIKit.h>
 #import <XCTest/XCTest.h>
 
-#import "../SDK/IRHotfixSDK/IRHotfixObjCBridge.h"
+#import "../SDK/IRHotfixSDK/Bridge/IRHotfixObjCBridge.h"
 
 #include <cstring>
 

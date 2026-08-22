@@ -99,8 +99,8 @@ fingerprint.
 
 The wrapper forwards object jobs whose primary basename is `Hotfix.swift` or
 `LLVMIRInterpreter.swift` directly to Apple `swift-frontend`. This prevents the
-runtime bridge and interpreter from instrumenting themselves. Rename or split
-those files only after updating and testing the exclusion rule.
+runtime files under `SDK/IRHotfixSDK/Runtime` from instrumenting themselves.
+Rename or split those files only after updating and testing the exclusion rule.
 
 To run focused integration tests on an installed simulator:
 
@@ -113,7 +113,7 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
 
 With the Swift Testing framework used here, XCTest-style method selectors can
 quietly select zero tests. Confirm a nonzero `totalTestCount` in the generated
-`.xcresult`; the target-level command above currently runs 55 unit tests.
+`.xcresult`; the target-level command above currently runs 60 unit tests.
 
 The full command is:
 
@@ -182,10 +182,11 @@ entry:
 }
 ```
 
-The interpreter represents `%self` as `.pointer(0)` and supplies the borrowed,
-live object in `LLVMHostContext`. Pointer zero resolves to that object for the
-supported Objective-C/UIKit bridges. Patch execution is synchronous and the
-receiver is not retained. UIKit bridging requires the main thread.
+The runtime initially represents the synthetic `%self` argument as
+`.pointer(0)`. At entry, the interpreter replaces only that designated argument
+with a structured host handle registered in `LLVMHostContext`; an ordinary null
+pointer remains nil. Patch execution is synchronous and the receiver is not
+retained. UIKit bridging requires the main thread.
 
 The patch author must make the entry return kind agree with the canonical
 signature return kind. The runtime checks entry parameter types, but it does not
