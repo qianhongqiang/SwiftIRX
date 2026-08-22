@@ -13,6 +13,10 @@ add_definitions(${LLVM_DEFINITIONS})
 add_library(HotfixPass MODULE Sources/HotfixPass.cpp)
 target_compile_features(HotfixPass PRIVATE cxx_std_20)
 target_include_directories(HotfixPass SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(
+  HotfixPass
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+)
 
 set(
   HOTFIX_PASS_OUTPUT_DIRECTORY

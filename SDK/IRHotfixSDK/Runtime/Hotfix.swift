@@ -41,7 +41,18 @@ nonisolated enum HotfixValueKind: UInt8, Codable, Sendable {
 }
 
 nonisolated enum HotfixABI {
-    static let maximumScalarArgumentCount: Int32 = 8
+    static let version = UInt32(HF_ABI_VERSION)
+    static let maximumScalarArgumentCount = Int32(HF_MAX_SCALAR_ARGUMENT_COUNT)
+
+    static let signedIntegerKind = UInt32(HFValueKindSignedInteger)
+    static let boolKind = UInt32(HFValueKindBool)
+    static let voidKind = UInt32(HFValueKindVoid)
+    static let invalidKind = UInt32(HFValueKindInvalid)
+
+    static let hasReceiverFlag = UInt32(HFPatchFrameFlagHasReceiver)
+    static let objectHandleKind = UInt16(HFHandleKindObject)
+    static let invalidHandleKind = UInt16(HFHandleKindInvalid)
+    static let borrowedHandleFlags = UInt16(HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress)
 }
 
 nonisolated enum HotfixID {
@@ -417,6 +428,94 @@ nonisolated enum HotfixResultEncoder {
     }
 }
 
+nonisolated enum HotfixFrameCodec {
+    static func decodeArguments(from frame: HFPatchFrame) -> [LLVMInvocationValue]? {
+        guard frame.argumentCount <= UInt32(HotfixABI.maximumScalarArgumentCount) else {
+            return nil
+        }
+        guard frame.argumentCount > 0 else {
+            guard frame.arguments == nil else {
+                return nil
+            }
+            return []
+        }
+        guard let arguments = frame.arguments else {
+            return nil
+        }
+
+        var decoded: [LLVMInvocationValue] = []
+        decoded.reserveCapacity(Int(frame.argumentCount))
+        for value in UnsafeBufferPointer(start: arguments, count: Int(frame.argumentCount)) {
+            guard value.flags == UInt32(HFValueFlagNone),
+                  value.bytes == nil,
+                  value.byteCount == 0 else {
+                return nil
+            }
+            switch value.kind {
+            case HotfixABI.signedIntegerKind:
+                decoded.append(.int(Int(bitPattern: UInt(value.bits))))
+            case HotfixABI.boolKind:
+                guard value.bits <= 1 else {
+                    return nil
+                }
+                decoded.append(.bool(value.bits == 1))
+            default:
+                return nil
+            }
+        }
+        return decoded
+    }
+
+    static func decodeReceiver(from frame: HFPatchFrame) -> AnyObject?? {
+        let knownFrameFlags = HotfixABI.hasReceiverFlag
+        guard frame.flags & ~knownFrameFlags == 0 else {
+            return nil
+        }
+
+        let hasReceiver = frame.flags & HotfixABI.hasReceiverFlag != 0
+        if !hasReceiver {
+            guard frame.receiver.token == 0,
+                  frame.receiver.generation == 0,
+                  frame.receiver.kind == HotfixABI.invalidHandleKind,
+                  frame.receiver.flags == UInt16(HFHandleFlagNone) else {
+                return nil
+            }
+            return .some(nil)
+        }
+
+        guard frame.receiver.token != 0,
+              frame.receiver.generation == 0,
+              frame.receiver.kind == HotfixABI.objectHandleKind,
+              frame.receiver.flags == HotfixABI.borrowedHandleFlags,
+              let pointer = UnsafeRawPointer(bitPattern: UInt(frame.receiver.token)) else {
+            return nil
+        }
+        return .some(Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue())
+    }
+
+    static func encodeResult(_ result: LLVMInvocationResult) -> HFValue? {
+        var value = HFValue()
+        value.flags = UInt32(HFValueFlagNone)
+        value.bytes = nil
+        value.byteCount = 0
+
+        switch result {
+        case let .int(result):
+            value.kind = HotfixABI.signedIntegerKind
+            value.bits = UInt64(truncatingIfNeeded: result)
+        case let .bool(result):
+            value.kind = HotfixABI.boolKind
+            value.bits = result ? 1 : 0
+        case .void:
+            value.kind = HotfixABI.voidKind
+            value.bits = 0
+        case .pointer:
+            return nil
+        }
+        return value
+    }
+}
+
 nonisolated enum HotfixBridgeRuntime {
     private final class Storage: @unchecked Sendable {
         let lock = NSRecursiveLock()
@@ -446,6 +545,50 @@ nonisolated enum HotfixBridgeRuntime {
     }
 }
 
+@_cdecl("hf_vm_invoke")
+nonisolated func hf_vm_invoke(
+    _ framePointer: UnsafeMutablePointer<HFPatchFrame>?
+) -> HFStatus {
+    guard let framePointer else {
+        return HFStatus(HFStatusInvalidFrame)
+    }
+
+    var frame = framePointer.pointee
+    func finish(_ status: HFStatus) -> HFStatus {
+        frame.status = status
+        framePointer.pointee = frame
+        return status
+    }
+
+    guard frame.abiVersion == HotfixABI.version else {
+        return finish(HFStatus(HFStatusABIVersionMismatch))
+    }
+    guard frame.structSize == UInt32(MemoryLayout<HFPatchFrame>.size),
+          frame.reserved == 0 else {
+        return finish(HFStatus(HFStatusInvalidFrame))
+    }
+    guard let arguments = HotfixFrameCodec.decodeArguments(from: frame),
+          let receiver = HotfixFrameCodec.decodeReceiver(from: frame) else {
+        return finish(HFStatus(HFStatusInvalidArguments))
+    }
+    guard let result = HotfixBridgeRuntime.current.invoke(
+        targetID: frame.targetID,
+        signatureID: frame.signatureID,
+        arguments: arguments,
+        receiver: receiver
+    ) else {
+        return finish(HFStatus(HFStatusNoPatch))
+    }
+    guard let encoded = HotfixFrameCodec.encodeResult(result) else {
+        return finish(HFStatus(HFStatusInvalidResult))
+    }
+
+    frame.result = encoded
+    return finish(HFStatus(HFStatusApplied))
+}
+
+/// Compatibility entry point for existing tests and external prototypes. New
+/// pass-generated trampolines call `hf_vm_invoke` with `HFPatchFrame`.
 @_cdecl("ir_hotfix_invoke")
 nonisolated func ir_hotfix_invoke(
     _ targetID: UInt64,
@@ -456,7 +599,7 @@ nonisolated func ir_hotfix_invoke(
     _ receiver: UnsafeRawPointer?,
     _ resultBits: UnsafeMutablePointer<UInt64>?
 ) -> Bool {
-    guard let arguments = HotfixArgumentDecoder.decode(
+    guard let decoded = HotfixArgumentDecoder.decode(
         kinds: argumentKinds,
         bits: argumentBits,
         count: argumentCount
@@ -464,18 +607,63 @@ nonisolated func ir_hotfix_invoke(
         return false
     }
 
-    let receiverObject = receiver.map {
-        Unmanaged<AnyObject>.fromOpaque($0).takeUnretainedValue()
+    let values: [HFValue] = decoded.map { argument in
+        var value = HFValue()
+        value.flags = UInt32(HFValueFlagNone)
+        switch argument {
+        case let .int(bits):
+            value.kind = HotfixABI.signedIntegerKind
+            value.bits = UInt64(truncatingIfNeeded: bits)
+        case let .bool(bits):
+            value.kind = HotfixABI.boolKind
+            value.bits = bits ? 1 : 0
+        case .pointer:
+            value.kind = HotfixABI.invalidKind
+        }
+        return value
     }
-    guard let result = HotfixBridgeRuntime.current.invoke(
-        targetID: targetID,
-        signatureID: signatureID,
-        arguments: arguments,
-        receiver: receiverObject
-    ) else {
-        return false
+
+    return values.withUnsafeBufferPointer { buffer in
+        var frame = HFPatchFrame()
+        frame.abiVersion = HotfixABI.version
+        frame.structSize = UInt32(MemoryLayout<HFPatchFrame>.size)
+        frame.targetID = targetID
+        frame.signatureID = signatureID
+        frame.arguments = values.isEmpty ? nil : buffer.baseAddress
+        frame.argumentCount = UInt32(values.count)
+        frame.result.kind = HotfixABI.invalidKind
+        frame.status = HFStatus(HFStatusInvalidFrame)
+
+        if let receiver {
+            frame.flags = HotfixABI.hasReceiverFlag
+            frame.receiver.token = UInt64(UInt(bitPattern: receiver))
+            frame.receiver.generation = 0
+            frame.receiver.kind = HotfixABI.objectHandleKind
+            frame.receiver.flags = HotfixABI.borrowedHandleFlags
+        } else {
+            frame.flags = UInt32(HFPatchFrameFlagNone)
+            frame.receiver.kind = HotfixABI.invalidHandleKind
+            frame.receiver.flags = UInt16(HFHandleFlagNone)
+        }
+
+        guard hf_vm_invoke(&frame) == HFStatus(HFStatusApplied) else {
+            return false
+        }
+        switch frame.result.kind {
+        case HotfixABI.signedIntegerKind:
+            guard let resultBits else { return false }
+            resultBits.pointee = frame.result.bits
+            return true
+        case HotfixABI.boolKind:
+            guard let resultBits, frame.result.bits <= 1 else { return false }
+            resultBits.pointee = frame.result.bits
+            return true
+        case HotfixABI.voidKind:
+            return resultBits == nil
+        default:
+            return false
+        }
     }
-    return HotfixResultEncoder.encode(result, to: resultBits)
 }
 
 nonisolated final class HotfixExecutor {

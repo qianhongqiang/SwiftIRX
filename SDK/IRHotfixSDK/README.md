@@ -4,6 +4,13 @@ The reusable iOS hotfix engine lives in this directory.
 
 ```text
 IRHotfixSDK/
+├── ABI/
+│   ├── HFStatus.h
+│   ├── HFHandle.h
+│   ├── HFValue.h
+│   ├── HFPatchFrame.h
+│   ├── HFDescriptor.h
+│   └── IRHotfixABI.h
 ├── Runtime/
 │   ├── Hotfix.swift
 │   └── LLVMIRInterpreter.swift
@@ -15,8 +22,12 @@ IRHotfixSDK/
     └── IRHotfix-Bridging-Header.h
 ```
 
+- `ABI/` is the versioned public C boundary shared by compiler-generated
+  trampolines, the VM gateway, and future native adapters. `HFPatchFrame` is
+  the sole invocation envelope; its embedded `HFHandle` and `HFValue` fields
+  do not expose Swift or Objective-C object layouts.
 - `Runtime/Hotfix.swift` contains the patch registry, execution entry points,
-  fallback behavior, and the C-callable ABI used by instrumented code.
+  fallback behavior, and the `hf_vm_invoke(HFPatchFrame *)` implementation.
 - `Runtime/LLVMIRInterpreter.swift` parses and executes the supported LLVM IR
   subset and owns structured host handles for objects, selectors, and classes.
 - `Bridge/IRHotfixObjCBridge.h` exposes a stable C ABI to Swift and future VM
@@ -27,6 +38,20 @@ IRHotfixSDK/
   future C, Swift, and C++ descriptor-driven adapters can share.
 - `Support/IRHotfix-Bridging-Header.h` is the app target's Swift bridging-header
   integration point.
+
+`HF_ABI_VERSION` is currently `1`. Every caller writes both `abiVersion` and
+`structSize`; the runtime validates them before reading arguments. A trampoline
+uses the patch result only for `HFStatusApplied`. `HFStatusNoPatch` and every
+validation/execution failure preserve the original implementation fallback.
+
+For the first version, an object receiver is represented by a structured,
+synchronous borrowed `HFHandle`. Its token temporarily carries the host address
+behind the `HFHandleFlagBorrowedAddress` flag. Consumers must still treat the
+token as opaque: a later handle table can replace that token meaning without
+changing `HFPatchFrame` layout.
+
+`ir_hotfix_invoke` remains only as a compatibility adapter for existing callers;
+new compiler output calls `hf_vm_invoke` directly.
 
 App-facing demo code stays under `IR/`. Compiler instrumentation stays under
 `Tools/HotfixPass` because it is a macOS host build tool rather than an iOS

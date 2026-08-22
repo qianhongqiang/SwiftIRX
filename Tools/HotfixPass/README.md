@@ -88,14 +88,13 @@ identifies the primary source and output. Quoting, nested files, paths containin
 spaces, missing files, and cycles are covered by the wrapper test. Relative
 response paths are resolved from the frontend process's working directory.
 
-The Debug build phase hashes `CMakeLists.txt`, `HotfixPass.cpp`, the receiver
-manifest generator, and the wrapper into
+The Debug build phase hashes `CMakeLists.txt`, `HotfixPass.cpp`, the public
+`SDK/IRHotfixSDK/ABI` headers, the receiver manifest generator, and the wrapper into
 `HotfixInstrumentationStamp.h`. A changed tool fingerprint changes this
 bridging-header input and invalidates all app Swift objects. When the hash is
 unchanged, the build phase preserves the stamp timestamp so an incremental
 no-op remains incremental. Response-file contents still participate through
-Xcode's normal compile invocation; they are not part of this four-file tool
-fingerprint.
+Xcode's normal compile invocation; they are not part of this tool fingerprint.
 
 The wrapper forwards object jobs whose primary basename is `Hotfix.swift` or
 `LLVMIRInterpreter.swift` directly to Apple `swift-frontend`. This prevents the
@@ -113,7 +112,7 @@ xcodebuild test -project IR.xcodeproj -scheme IR \
 
 With the Swift Testing framework used here, XCTest-style method selectors can
 quietly select zero tests. Confirm a nonzero `totalTestCount` in the generated
-`.xcresult`; the target-level command above currently runs 63 unit tests.
+`.xcresult`; the target-level command above currently runs 65 unit tests.
 
 The full command is:
 
@@ -239,26 +238,27 @@ Swift 6.2.4 demangles supported actor contexts through that class-shaped path.
 ## Transformation and fallback
 
 Each eligible definition becomes a trampoline plus a private
-`<symbol>.hotfix_original` clone. The trampoline marshals scalar bits and the
-optional receiver into `ir_hotfix_invoke`. It returns the interpreted result
-only when that bridge returns `true`; otherwise it calls the native clone with
-the untouched Swift ABI values.
+`<symbol>.hotfix_original` clone. The trampoline marshals each scalar into an
+`HFValue`, represents an optional object receiver as an `HFHandle`, fills a
+versioned `HFPatchFrame`, and passes that one frame pointer to `hf_vm_invoke`.
+It returns the frame result only when the gateway returns `HFStatusApplied`;
+every other status calls the native clone with the untouched Swift ABI values.
 
 Fallback covers no active patch, a target/signature mismatch, malformed IR,
 missing entry function, entry parameter mismatch, interpreter error, execution
-budget failure, malformed bridge metadata, void-versus-scalar result mismatch,
-and unsupported result encoding. Malformed metadata includes a negative or
-greater-than-eight count, missing kind/bits arrays for a nonzero count, an
-unknown or void argument kind, noncanonical boolean bits, and a missing or
-unexpected result pointer. An `i64`/`i1` result mismatch is not in this list
-because it is not rejected today; it is encoded as described above. The current
-runtime uses `try?` for interpreter failures and does not expose a production
-diagnostic/reporting hook.
+budget failure, malformed frame metadata, and unsupported result encoding.
+Malformed metadata includes an ABI-version or structure-size mismatch, a
+nonzero reserved field, more than eight arguments, a missing or unexpected
+argument array, unknown flags or kinds, noncanonical boolean bits, and an
+invalid receiver handle. The current interpreter path maps both an absent patch
+and execution failure to `HFStatusNoPatch`; the more specific public status
+values are reserved for later diagnostic propagation.
 
-The C entry point cannot prove that an arbitrary nonnull pointer names readable
-or writable mapped memory. It trusts such addresses after the nil/count/kind
-metadata checks. Pass-generated calls provide valid storage, but an erroneous
-external C caller can still cause a process crash rather than a native fallback.
+The C entry point cannot prove that an arbitrary nonnull argument pointer or a
+borrowed-address handle token names readable mapped memory. It trusts those
+addresses after structural validation. Pass-generated calls provide valid,
+synchronous storage, but an erroneous external C caller can still cause a
+process crash rather than a native fallback.
 
 Direct recursive calls inside the native clone are rewritten to call the clone,
 so native recursion does not keep entering the trampoline. Patch recursion is
@@ -287,25 +287,28 @@ every interpreted function it calls:
 
 Duplicate basic-block labels, unsafe aggregate indices, and nonfinite,
 fractional, or out-of-range integer spellings throw parser/runtime errors. A
-patch invoked through `ir_hotfix_invoke` converts those errors and the execution
-budget errors into `false`, so the trampoline takes its native fallback. A
-direct call to `LLVMIRInterpreter.run` receives the corresponding error.
+patch invoked through `hf_vm_invoke` converts those errors and the execution
+budget errors into a non-applied status, so the trampoline takes its native
+fallback. A direct call to `LLVMIRInterpreter.run` receives the corresponding
+error.
 
 ## Descriptor section
 
-The pass emits one retained, 8-byte-aligned descriptor for every eligible
-function into Mach-O `__DATA,__hotfix`. Its fixed LLVM layout is:
+The pass emits one retained, 8-byte-aligned, ABI-versioned `HFDescriptor` for
+every eligible function into Mach-O `__DATA,__hotfix`. Its fixed LLVM layout is:
 
 ```text
-{ i64 targetID, i64 signatureID, i8 returnKind, i32 scalarCount,
-  i8 hasReceiver, ptr mangledName, ptr orderedScalarKinds }
+{ i32 abiVersion, i32 structSize, i64 targetID, i64 signatureID,
+  i32 returnKind, i32 scalarCount, i32 flags, i32 reserved,
+  ptr mangledName, ptr orderedScalarKinds }
 ```
 
-Kind values are `1 = i64`, `2 = i1`, and return-only `3 = void`. The trampoline
-also embeds both IDs directly, so invocation does not depend on scanning the
-section. This repository currently verifies the section with `llvm-objdump` and
-IR fixtures; it does not ship a descriptor exporter or runtime duplicate-ID
-scanner.
+The ordered kinds are 32-bit `HFValueKind` entries. Current instrumented values
+use `1 = i64`, `2 = i1`, and return-only `3 = void`; descriptor flag bit zero
+is set when the function has a receiver. The trampoline also embeds both IDs
+directly, so invocation does not depend on scanning the section. This repository currently
+verifies the section with `llvm-objdump` and IR fixtures; it does not ship a
+descriptor exporter or runtime duplicate-ID scanner.
 
 ## Debug compromises and production limits
 

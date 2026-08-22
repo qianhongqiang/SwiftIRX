@@ -68,9 +68,12 @@ assert_receiver_instrumented() {
   grep -Fq "define private swiftcc i64 @\"$symbol.hotfix_original\"" "$ir_file"
   awk -v symbol="$symbol" '
     index($0, "define swiftcc") && index($0, symbol) { in_function = 1 }
-    in_function && /call i1 @ir_hotfix_invoke/ && /i32 1, ptr %/ { found = 1 }
+    in_function && /ptrtoint ptr %.* to i64/ { token = 1 }
+    in_function && /store i16 1, ptr/ { kind = 1 }
+    in_function && /store i16 -32767, ptr/ { flags = 1 }
+    in_function && /call i32 @hf_vm_invoke/ { invoked = 1 }
     in_function && /^}/ { in_function = 0 }
-    END { exit found ? 0 : 1 }
+    END { exit token && kind && flags && invoked ? 0 : 1 }
   ' "$ir_file"
   name_global="$(
     grep -F "c\"$symbol\\00\"" "$ir_file" |
@@ -80,8 +83,8 @@ assert_receiver_instrumented() {
     echo "error: receiver $symbol has no descriptor name constant" >&2
     return 1
   fi
-  grep -F 'private constant %struct.ir_hotfix_descriptor {' "$ir_file" |
-    grep -F 'i8 1, i32 1, i8 1' |
+  grep -F 'private constant %struct.HFDescriptor {' "$ir_file" |
+    grep -F 'i32 1, i32 0, ptr' |
     grep -F 'section "__DATA,__hotfix"' |
     grep -Fq "ptr $name_global"
 }

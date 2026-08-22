@@ -1207,6 +1207,87 @@ struct IRTests {
         #expect(result == .int(42))
     }
 
+    @Test func publicFrameABIHasStableVersionOneLayouts() {
+        #expect(HotfixABI.version == 1)
+        #expect(MemoryLayout<HFHandle>.size == 16)
+        #expect(MemoryLayout<HFValue>.size == 32)
+        #expect(MemoryLayout<HFPatchFrame>.size == 96)
+        #expect(MemoryLayout<HFDescriptor>.size == 56)
+    }
+
+    @Test func frameGatewayValidatesInvokesAndEncodesResult() throws {
+        let suiteName = "ir.hotfix.frame.tests.\(UUID().uuidString)"
+        let userDefaults = UserDefaults(suiteName: suiteName)!
+        defer { userDefaults.removePersistentDomain(forName: suiteName) }
+        let manager = HotfixManager(userDefaults: userDefaults, storageKey: "state")
+        let patch = HotfixPatch(
+            id: "patch.frame.int",
+            targetID: 81,
+            signatureID: 82,
+            entryFunction: "patch",
+            ir: """
+            define i64 @patch(i64 %value) {
+            entry:
+              %result = add i64 %value, 2
+              ret i64 %result
+            }
+            """
+        )
+        manager.upsert(patch)
+        try manager.activatePatch(id: patch.id)
+
+        func makeFrame(targetID: UInt64 = 81) -> HFPatchFrame {
+            var frame = HFPatchFrame()
+            frame.abiVersion = HotfixABI.version
+            frame.structSize = UInt32(MemoryLayout<HFPatchFrame>.size)
+            frame.targetID = targetID
+            frame.signatureID = 82
+            frame.receiver.kind = HotfixABI.invalidHandleKind
+            frame.result.kind = HotfixABI.invalidKind
+            frame.status = HFStatus(HFStatusInvalidFrame)
+            return frame
+        }
+
+        let runtime = HotfixRuntime(manager: manager)
+        HotfixBridgeRuntime.withRuntimeForTesting(runtime) {
+            var argument = HFValue()
+            argument.kind = HotfixABI.signedIntegerKind
+            argument.bits = 40
+            var frame = makeFrame()
+            frame.argumentCount = 1
+            let status = withUnsafePointer(to: &argument) { pointer in
+                frame.arguments = pointer
+                return hf_vm_invoke(&frame)
+            }
+            #expect(status == HFStatus(HFStatusApplied))
+            #expect(frame.status == HFStatus(HFStatusApplied))
+            #expect(frame.result.kind == HotfixABI.signedIntegerKind)
+            #expect(frame.result.bits == 42)
+
+            var missing = makeFrame(targetID: 999)
+            #expect(hf_vm_invoke(&missing) == HFStatus(HFStatusNoPatch))
+            #expect(missing.status == HFStatus(HFStatusNoPatch))
+            #expect(missing.result.kind == HotfixABI.invalidKind)
+
+            var wrongVersion = makeFrame()
+            wrongVersion.abiVersion = HotfixABI.version + 1
+            #expect(hf_vm_invoke(&wrongVersion) == HFStatus(HFStatusABIVersionMismatch))
+            #expect(wrongVersion.status == HFStatus(HFStatusABIVersionMismatch))
+
+            var malformed = makeFrame()
+            malformed.structSize = 0
+            #expect(hf_vm_invoke(&malformed) == HFStatus(HFStatusInvalidFrame))
+            #expect(malformed.status == HFStatus(HFStatusInvalidFrame))
+
+            var unexpectedArguments = makeFrame()
+            withUnsafePointer(to: &argument) { pointer in
+                unexpectedArguments.arguments = pointer
+                #expect(hf_vm_invoke(&unexpectedArguments) == HFStatus(HFStatusInvalidArguments))
+            }
+            #expect(unexpectedArguments.status == HFStatus(HFStatusInvalidArguments))
+        }
+    }
+
     @Test func rawCBridgeDecodesAndEncodesSupportedValues() throws {
         let suiteName = "ir.hotfix.bridge.tests.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!

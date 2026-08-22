@@ -29,7 +29,9 @@ fi
 
 (
   cd "$TEMP"
-  xcrun clang -c "$FIXTURES/runtime_stub.c" -o runtime_stub.o
+  xcrun clang -x objective-c++ -std=c++20 \
+    -I "$ROOT/SDK/IRHotfixSDK/ABI" \
+    -c "$FIXTURES/runtime_stub.c" -o runtime_stub.o
   IR_HOTFIX_PLUGIN_PATH="$PLUGIN" "$WRAPPER" \
     -Onone \
     -g \
@@ -50,7 +52,7 @@ grep -qx '42' "$TEMP/native-output.txt"
 "$LLVM_ROOT/llvm-nm" "$TEMP/wrapper_scalar.o" >"$TEMP/scalar-symbols.txt"
 grep -Fq 'wrapperAdd' "$TEMP/scalar-symbols.txt"
 grep -Fq '.hotfix_original' "$TEMP/scalar-symbols.txt"
-grep -Fq '_ir_hotfix_invoke' "$TEMP/scalar-symbols.txt"
+grep -Fq '_hf_vm_invoke' "$TEMP/scalar-symbols.txt"
 "$LLVM_ROOT/llvm-objdump" --macho --section-headers \
   "$TEMP/wrapper_scalar.o" >"$TEMP/scalar-sections.txt"
 grep -Fq '__hotfix' "$TEMP/scalar-sections.txt"
@@ -82,7 +84,7 @@ printf '%s\n' '@"responses/compile args.rsp"' \
 "$LLVM_ROOT/llvm-nm" "$TEMP/response object.o" \
   >"$TEMP/response-symbols.txt"
 grep -Fq '.hotfix_original' "$TEMP/response-symbols.txt"
-grep -Fq '_ir_hotfix_invoke' "$TEMP/response-symbols.txt"
+grep -Fq '_hf_vm_invoke' "$TEMP/response-symbols.txt"
 "$LLVM_ROOT/llvm-objdump" --macho --section-headers \
   "$TEMP/response object.o" >"$TEMP/response-sections.txt"
 grep -Fq '__hotfix' "$TEMP/response-sections.txt"

@@ -94,7 +94,7 @@ grep -Eq '^define private swiftcc i64 .*instanceTarget.*\.hotfix_original' \
 
 grep -Fq "HotfixFixtureOne" "$TEMP/linked.ll"
 grep -Fq "HotfixFixtureTwo" "$TEMP/linked.ll"
-if [[ "$(grep -Fc 'call i1 @ir_hotfix_invoke' "$TEMP/linked.ll")" -lt 2 ]]; then
+if [[ "$(grep -Fc 'call i32 @hf_vm_invoke' "$TEMP/linked.ll")" -lt 2 ]]; then
   echo "error: linked Swift modules did not retain both hotfix trampolines" >&2
   exit 1
 fi

@@ -18,6 +18,8 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
+#include "IRHotfixABI.h"
+
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -30,7 +32,8 @@ constexpr StringLiteral OriginalSuffix = ".hotfix_original";
 constexpr StringLiteral DescriptorSection = "__DATA,__hotfix";
 constexpr StringLiteral ReceiverManifestEnvironment =
     "IR_HOTFIX_CLASS_RECEIVER_MANIFEST";
-constexpr unsigned MaximumScalarArgumentCount = 8;
+constexpr unsigned MaximumScalarArgumentCount =
+    HF_MAX_SCALAR_ARGUMENT_COUNT;
 
 enum class FunctionClassification { NotCandidate, Eligible, Skipped };
 
@@ -108,7 +111,8 @@ FunctionShape classifyFunction(Function &function,
     return shape;
 
   StringRef name = function.getName();
-  if (name.starts_with("ir_hotfix_") || name.ends_with(OriginalSuffix))
+  if (name.starts_with("ir_hotfix_") || name.starts_with("hf_vm_") ||
+      name.ends_with(OriginalSuffix))
     return shape;
 
   shape.classification = FunctionClassification::Skipped;
@@ -172,15 +176,91 @@ void addLoadMarker(Module &module) {
                      GlobalValue::PrivateLinkage, marker, "hotfix_pass_loaded");
 }
 
+StructType *getHFValueType(LLVMContext &context) {
+  SmallVector<Type *> fields = {
+      Type::getInt32Ty(context), Type::getInt32Ty(context),
+      Type::getInt64Ty(context), PointerType::getUnqual(context),
+      Type::getInt64Ty(context)};
+  StructType *type = StructType::getTypeByName(context, "struct.HFValue");
+  if (type == nullptr)
+    return StructType::create(context, fields, "struct.HFValue");
+  if (type->isOpaque()) {
+    type->setBody(fields);
+    return type;
+  }
+  if (!type->isLayoutIdentical(StructType::get(context, fields)))
+    report_fatal_error("[HotfixPass] incompatible struct.HFValue layout",
+                       false);
+  return type;
+}
+
+StructType *getHFHandleType(LLVMContext &context) {
+  SmallVector<Type *> fields = {
+      Type::getInt64Ty(context), Type::getInt32Ty(context),
+      Type::getInt16Ty(context), Type::getInt16Ty(context)};
+  StructType *type = StructType::getTypeByName(context, "struct.HFHandle");
+  if (type == nullptr)
+    return StructType::create(context, fields, "struct.HFHandle");
+  if (type->isOpaque()) {
+    type->setBody(fields);
+    return type;
+  }
+  if (!type->isLayoutIdentical(StructType::get(context, fields)))
+    report_fatal_error("[HotfixPass] incompatible struct.HFHandle layout",
+                       false);
+  return type;
+}
+
+StructType *getHFPatchFrameType(LLVMContext &context) {
+  StructType *handle = getHFHandleType(context);
+  StructType *value = getHFValueType(context);
+  SmallVector<Type *> fields = {
+      Type::getInt32Ty(context), Type::getInt32Ty(context),
+      Type::getInt64Ty(context), Type::getInt64Ty(context),
+      PointerType::getUnqual(context), Type::getInt32Ty(context),
+      Type::getInt32Ty(context), handle, value,
+      Type::getInt32Ty(context), Type::getInt32Ty(context)};
+  StructType *type =
+      StructType::getTypeByName(context, "struct.HFPatchFrame");
+  if (type == nullptr)
+    return StructType::create(context, fields, "struct.HFPatchFrame");
+  if (type->isOpaque()) {
+    type->setBody(fields);
+    return type;
+  }
+  if (!type->isLayoutIdentical(StructType::get(context, fields)))
+    report_fatal_error("[HotfixPass] incompatible struct.HFPatchFrame layout",
+                       false);
+  return type;
+}
+
+StructType *getHFDescriptorType(LLVMContext &context) {
+  SmallVector<Type *> fields = {
+      Type::getInt32Ty(context), Type::getInt32Ty(context),
+      Type::getInt64Ty(context), Type::getInt64Ty(context),
+      Type::getInt32Ty(context), Type::getInt32Ty(context),
+      Type::getInt32Ty(context), Type::getInt32Ty(context),
+      PointerType::getUnqual(context), PointerType::getUnqual(context)};
+  StructType *type =
+      StructType::getTypeByName(context, "struct.HFDescriptor");
+  if (type == nullptr)
+    return StructType::create(context, fields, "struct.HFDescriptor");
+  if (type->isOpaque()) {
+    type->setBody(fields);
+    return type;
+  }
+  if (!type->isLayoutIdentical(StructType::get(context, fields)))
+    report_fatal_error("[HotfixPass] incompatible struct.HFDescriptor layout",
+                       false);
+  return type;
+}
+
 FunctionCallee getRuntimeInvoke(Module &module) {
   LLVMContext &context = module.getContext();
-  Type *i1 = Type::getInt1Ty(context);
   Type *i32 = Type::getInt32Ty(context);
-  Type *i64 = Type::getInt64Ty(context);
   Type *pointer = PointerType::getUnqual(context);
-  FunctionType *type = FunctionType::get(
-      i1, {i64, i64, pointer, pointer, i32, pointer, pointer}, false);
-  return module.getOrInsertFunction("ir_hotfix_invoke", type);
+  FunctionType *type = FunctionType::get(i32, {pointer}, false);
+  return module.getOrInsertFunction("hf_vm_invoke", type);
 }
 
 Function *cloneOriginal(Function &function) {
@@ -235,40 +315,26 @@ void prepareTrampolineAttributes(Function &function) {
   function.addFnAttr(Attribute::NoInline);
 }
 
-uint8_t scalarKind(Type *type) { return type->isIntegerTy(64) ? 1 : 2; }
+uint32_t scalarKind(Type *type) {
+  return type->isIntegerTy(64) ? HFValueKindSignedInteger : HFValueKindBool;
+}
 
-uint8_t returnKind(Type *type) {
+uint32_t returnKind(Type *type) {
   if (type->isIntegerTy(64))
-    return 1;
+    return HFValueKindSignedInteger;
   if (type->isIntegerTy(1))
-    return 2;
-  return 3;
+    return HFValueKindBool;
+  return HFValueKindVoid;
 }
 
 GlobalVariable *createDescriptor(Function &function, const FunctionShape &shape,
                                  uint64_t targetID, uint64_t signatureID) {
   Module &module = *function.getParent();
   LLVMContext &context = module.getContext();
-  Type *i8 = Type::getInt8Ty(context);
   Type *i32 = Type::getInt32Ty(context);
   Type *i64 = Type::getInt64Ty(context);
   Type *pointer = PointerType::getUnqual(context);
-
-  // Layout: target ID, signature ID, return kind, scalar count, receiver,
-  // mangled-name pointer, ordered scalar-kind pointer.
-  SmallVector<Type *> descriptorFields = {i64, i64,     i8,     i32,
-                                          i8,  pointer, pointer};
-  StructType *descriptorType =
-      StructType::getTypeByName(context, "struct.ir_hotfix_descriptor");
-  if (descriptorType == nullptr) {
-    descriptorType = StructType::create(context, descriptorFields,
-                                        "struct.ir_hotfix_descriptor");
-  } else if (descriptorType->isOpaque() ||
-             !descriptorType->isLayoutIdentical(
-                 StructType::get(context, descriptorFields))) {
-    descriptorType = StructType::create(context, descriptorFields,
-                                        "struct.ir_hotfix_descriptor");
-  }
+  StructType *descriptorType = getHFDescriptorType(context);
 
   std::string uniqueSuffix =
       utohexstr(targetID, true, 16) + "." + utohexstr(signatureID, true, 16);
@@ -280,7 +346,7 @@ GlobalVariable *createDescriptor(Function &function, const FunctionShape &shape,
 
   Constant *kindsPointer = ConstantPointerNull::get(cast<PointerType>(pointer));
   if (!shape.scalarArguments.empty()) {
-    SmallVector<uint8_t> kinds;
+    SmallVector<uint32_t> kinds;
     kinds.reserve(shape.scalarArguments.size());
     for (const Argument *argument : shape.scalarArguments)
       kinds.push_back(scalarKind(argument->getType()));
@@ -292,11 +358,16 @@ GlobalVariable *createDescriptor(Function &function, const FunctionShape &shape,
   }
 
   Constant *fields[] = {
+      ConstantInt::get(i32, HF_ABI_VERSION),
+      ConstantInt::get(i32, sizeof(HFDescriptor)),
       ConstantInt::get(i64, targetID),
       ConstantInt::get(i64, signatureID),
-      ConstantInt::get(i8, returnKind(function.getReturnType())),
+      ConstantInt::get(i32, returnKind(function.getReturnType())),
       ConstantInt::get(i32, shape.scalarArguments.size()),
-      ConstantInt::get(i8, shape.receiver == nullptr ? 0 : 1),
+      ConstantInt::get(i32, shape.receiver == nullptr
+                                ? HFDescriptorFlagNone
+                                : HFDescriptorFlagHasReceiver),
+      ConstantInt::get(i32, 0),
       name,
       kindsPointer,
   };
@@ -337,76 +408,163 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
       BasicBlock::Create(context, "hotfix.fallback", &function);
   IRBuilder<> builder(entry);
 
-  Type *i8 = builder.getInt8Ty();
-  Type *i32 = builder.getInt32Ty();
   Type *i64 = builder.getInt64Ty();
   PointerType *pointer = builder.getPtrTy();
+  StructType *valueType = getHFValueType(context);
+  StructType *handleType = getHFHandleType(context);
+  StructType *frameType = getHFPatchFrameType(context);
   const unsigned argumentCount = shape.scalarArguments.size();
 
-  Value *kindsPointer = ConstantPointerNull::get(pointer);
-  Value *bitsPointer = ConstantPointerNull::get(pointer);
+  Value *argumentsPointer = ConstantPointerNull::get(pointer);
   if (argumentCount != 0) {
-    ArrayType *kindsType = ArrayType::get(i8, argumentCount);
-    ArrayType *bitsType = ArrayType::get(i64, argumentCount);
-    AllocaInst *kinds =
-        builder.CreateAlloca(kindsType, nullptr, "hotfix.argument.kinds");
-    AllocaInst *bits =
-        builder.CreateAlloca(bitsType, nullptr, "hotfix.argument.bits");
-    kinds->setAlignment(Align(1));
-    bits->setAlignment(Align(8));
-    kindsPointer = kinds;
-    bitsPointer = bits;
+    ArrayType *argumentsType = ArrayType::get(valueType, argumentCount);
+    AllocaInst *arguments = builder.CreateAlloca(
+        argumentsType, nullptr, "hotfix.arguments");
+    arguments->setAlignment(Align(8));
+    Value *firstIndices[] = {builder.getInt32(0), builder.getInt32(0)};
+    argumentsPointer = builder.CreateInBoundsGEP(
+        argumentsType, arguments, firstIndices, "hotfix.arguments.pointer");
 
     unsigned index = 0;
     for (Argument *argument : shape.scalarArguments) {
       Value *indices[] = {builder.getInt32(0), builder.getInt32(index)};
-      Value *kindSlot = builder.CreateInBoundsGEP(kindsType, kinds, indices,
-                                                  "hotfix.argument.kind");
-      Value *bitsSlot = builder.CreateInBoundsGEP(bitsType, bits, indices,
-                                                  "hotfix.argument.bits.slot");
-
-      uint8_t kind = scalarKind(argument->getType());
-      StoreInst *kindStore =
-          builder.CreateStore(builder.getInt8(kind), kindSlot);
-      kindStore->setAlignment(Align(1));
+      Value *slot = builder.CreateInBoundsGEP(
+          argumentsType, arguments, indices, "hotfix.argument");
+      builder.CreateStore(
+          builder.getInt32(scalarKind(argument->getType())),
+          builder.CreateStructGEP(valueType, slot, 0,
+                                  "hotfix.argument.kind"));
+      builder.CreateStore(
+          builder.getInt32(HFValueFlagNone),
+          builder.CreateStructGEP(valueType, slot, 1,
+                                  "hotfix.argument.flags"));
 
       Value *encoded = argument;
       if (argument->getType()->isIntegerTy(1))
         encoded =
             builder.CreateZExt(argument, i64, "hotfix.argument.bits.value");
-      StoreInst *bitsStore = builder.CreateStore(encoded, bitsSlot);
+      StoreInst *bitsStore = builder.CreateStore(
+          encoded, builder.CreateStructGEP(valueType, slot, 2,
+                                            "hotfix.argument.bits"));
       bitsStore->setAlignment(Align(8));
+      builder.CreateStore(
+          ConstantPointerNull::get(pointer),
+          builder.CreateStructGEP(valueType, slot, 3,
+                                  "hotfix.argument.bytes"));
+      StoreInst *byteCountStore = builder.CreateStore(
+          builder.getInt64(0),
+          builder.CreateStructGEP(valueType, slot, 4,
+                                  "hotfix.argument.byte_count"));
+      byteCountStore->setAlignment(Align(8));
       ++index;
     }
   }
 
-  Value *resultPointer = ConstantPointerNull::get(pointer);
-  AllocaInst *resultBits = nullptr;
-  if (!function.getReturnType()->isVoidTy()) {
-    resultBits = builder.CreateAlloca(i64, nullptr, "hotfix.result.bits");
-    resultBits->setAlignment(Align(8));
-    resultPointer = resultBits;
-  }
-
   uint64_t targetID = fnv1a64(function.getName());
   uint64_t signatureID = fnv1a64(canonicalSignature(function, shape));
-  Value *receiver = shape.receiver == nullptr
-                        ? ConstantPointerNull::get(pointer)
-                        : static_cast<Value *>(shape.receiver);
-  CallInst *applied = builder.CreateCall(
-      runtimeInvoke,
-      {ConstantInt::get(i64, targetID), ConstantInt::get(i64, signatureID),
-       kindsPointer, bitsPointer, ConstantInt::get(i32, argumentCount),
-       receiver, resultPointer},
-      "hotfix.applied");
+  AllocaInst *frame =
+      builder.CreateAlloca(frameType, nullptr, "hotfix.frame");
+  frame->setAlignment(Align(8));
+  builder.CreateStore(
+      builder.getInt32(HF_ABI_VERSION),
+      builder.CreateStructGEP(frameType, frame, 0, "hotfix.frame.abi_version"));
+  builder.CreateStore(
+      builder.getInt32(sizeof(HFPatchFrame)),
+      builder.CreateStructGEP(frameType, frame, 1, "hotfix.frame.struct_size"));
+  StoreInst *targetStore = builder.CreateStore(
+      builder.getInt64(targetID),
+      builder.CreateStructGEP(frameType, frame, 2, "hotfix.frame.target_id"));
+  targetStore->setAlignment(Align(8));
+  StoreInst *signatureStore = builder.CreateStore(
+      builder.getInt64(signatureID),
+      builder.CreateStructGEP(frameType, frame, 3,
+                              "hotfix.frame.signature_id"));
+  signatureStore->setAlignment(Align(8));
+  builder.CreateStore(
+      argumentsPointer,
+      builder.CreateStructGEP(frameType, frame, 4, "hotfix.frame.arguments"));
+  builder.CreateStore(
+      builder.getInt32(argumentCount),
+      builder.CreateStructGEP(frameType, frame, 5,
+                              "hotfix.frame.argument_count"));
+  builder.CreateStore(
+      builder.getInt32(shape.receiver == nullptr ? HFPatchFrameFlagNone
+                                                 : HFPatchFrameFlagHasReceiver),
+      builder.CreateStructGEP(frameType, frame, 6, "hotfix.frame.flags"));
+
+  Value *receiverSlot =
+      builder.CreateStructGEP(frameType, frame, 7, "hotfix.frame.receiver");
+  Value *receiverToken = builder.getInt64(0);
+  if (shape.receiver != nullptr)
+    receiverToken = builder.CreatePtrToInt(shape.receiver, i64,
+                                           "hotfix.receiver.token");
+  StoreInst *tokenStore = builder.CreateStore(
+      receiverToken,
+      builder.CreateStructGEP(handleType, receiverSlot, 0,
+                              "hotfix.receiver.handle_token"));
+  tokenStore->setAlignment(Align(8));
+  builder.CreateStore(
+      builder.getInt32(0),
+      builder.CreateStructGEP(handleType, receiverSlot, 1,
+                              "hotfix.receiver.generation"));
+  builder.CreateStore(
+      builder.getInt16(shape.receiver == nullptr ? HFHandleKindInvalid
+                                                 : HFHandleKindObject),
+      builder.CreateStructGEP(handleType, receiverSlot, 2,
+                              "hotfix.receiver.kind"));
+  builder.CreateStore(
+      builder.getInt16(shape.receiver == nullptr
+                           ? HFHandleFlagNone
+                           : HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress),
+      builder.CreateStructGEP(handleType, receiverSlot, 3,
+                              "hotfix.receiver.flags"));
+
+  Value *resultSlot =
+      builder.CreateStructGEP(frameType, frame, 8, "hotfix.frame.result");
+  builder.CreateStore(
+      builder.getInt32(HFValueKindInvalid),
+      builder.CreateStructGEP(valueType, resultSlot, 0,
+                              "hotfix.result.kind"));
+  builder.CreateStore(
+      builder.getInt32(HFValueFlagNone),
+      builder.CreateStructGEP(valueType, resultSlot, 1,
+                              "hotfix.result.flags"));
+  StoreInst *initialBitsStore = builder.CreateStore(
+      builder.getInt64(0),
+      builder.CreateStructGEP(valueType, resultSlot, 2,
+                              "hotfix.result.bits"));
+  initialBitsStore->setAlignment(Align(8));
+  builder.CreateStore(
+      ConstantPointerNull::get(pointer),
+      builder.CreateStructGEP(valueType, resultSlot, 3,
+                              "hotfix.result.bytes"));
+  StoreInst *initialByteCountStore = builder.CreateStore(
+      builder.getInt64(0),
+      builder.CreateStructGEP(valueType, resultSlot, 4,
+                              "hotfix.result.byte_count"));
+  initialByteCountStore->setAlignment(Align(8));
+  builder.CreateStore(
+      builder.getInt32(HFStatusInvalidFrame),
+      builder.CreateStructGEP(frameType, frame, 9, "hotfix.frame.status"));
+  builder.CreateStore(
+      builder.getInt32(0),
+      builder.CreateStructGEP(frameType, frame, 10, "hotfix.frame.reserved"));
+
+  CallInst *status =
+      builder.CreateCall(runtimeInvoke, {frame}, "hotfix.status");
+  Value *applied = builder.CreateICmpEQ(
+      status, builder.getInt32(HFStatusApplied), "hotfix.applied");
   builder.CreateCondBr(applied, patched, fallback);
 
   builder.SetInsertPoint(patched);
   if (function.getReturnType()->isVoidTy()) {
     builder.CreateRetVoid();
   } else {
-    LoadInst *loaded =
-        builder.CreateLoad(i64, resultBits, "hotfix.result.value");
+    LoadInst *loaded = builder.CreateLoad(
+        i64,
+        builder.CreateStructGEP(valueType, resultSlot, 2,
+                                "hotfix.result.bits.patched"),
+        "hotfix.result.value");
     loaded->setAlignment(Align(8));
     Value *result = loaded;
     if (function.getReturnType()->isIntegerTy(1))
