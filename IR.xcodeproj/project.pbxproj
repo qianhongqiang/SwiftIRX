@@ -280,7 +280,12 @@
 				"$(SRCROOT)/Tools/HotfixPass/CMakeLists.txt",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixManifestTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPatchTool.cpp",
+				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPackageTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPass.cpp",
+				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFIR.h",
+				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFIR.cpp",
+				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFPatchContainer.h",
+				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFPatchContainer.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/generate-class-receiver-manifest.sh",
 				"$(SRCROOT)/Tools/HotfixPass/swiftc-hotfix",
 			);
@@ -289,6 +294,7 @@
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/libHotfixPass.dylib",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixManifestTool",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixPatchTool",
+				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixPackageTool",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixInstrumentationStamp.h",
 			);
 			runOnlyForDeploymentPostprocessing = 0;

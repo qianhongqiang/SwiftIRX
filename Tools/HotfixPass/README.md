@@ -24,6 +24,11 @@ Swift patch source + app Target Manifest
   -> HotfixPatchTool ABI validation and single-function extraction
   -> .irpatch text artifact
 
+HFIR package model
+  -> IRHotfixFormat semantic verifier
+  -> deterministic .hfpatch v1 container
+  -> HotfixPackageTool verify/dump
+
 Released source branch + edited @HotfixPatch function + released Target Manifest
   -> Xcode build with the application's original compiler settings
   -> IRHotfixMacrosPlugin annotation anchors
@@ -71,7 +76,8 @@ cmake --build Tools/HotfixPass/.cmake-build --config Release
 The plugin and host executables are written to
 `Tools/HotfixPass/.build/libHotfixPass.dylib` and
 `Tools/HotfixPass/.build/HotfixManifestTool` and
-`Tools/HotfixPass/.build/HotfixPatchTool`. Both build directories are generated
+`Tools/HotfixPass/.build/HotfixPatchTool` and
+`Tools/HotfixPass/.build/HotfixPackageTool`. Both build directories are generated
 and ignored by Git.
 
 Run the compiler-side checks after building:
@@ -81,6 +87,7 @@ Tools/HotfixPass/Tests/run-pass-tests.sh
 Tools/HotfixPass/Tests/verify-swift-load.sh
 Tools/HotfixPass/Tests/verify-wrapper.sh
 Tools/HotfixPass/Tests/verify-patch-build.sh
+Tools/HotfixPass/Tests/verify-hfpatch-format.sh
 ```
 
 `run-pass-tests.sh` checks scalar and receiver classification, deterministic
@@ -93,6 +100,9 @@ execution, response files, section/symbol presence, and default source
 exclusion. `verify-patch-build.sh` compiles Swift patch sources and checks target
 selection, receiver and scalar ABI validation, ambiguous queries, local helper
 rejection, and single-function output.
+`verify-hfpatch-format.sh` checks HFIR semantic rejection, deterministic binary
+round-tripping, optional sections, dump output, corruption detection, and the
+absence of LLVM IR and Swift mangled symbols from the published container.
 
 ## Patch-branch extraction
 

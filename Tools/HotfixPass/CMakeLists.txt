@@ -36,6 +36,25 @@ target_include_directories(
 )
 target_link_libraries(HotfixPatchTool PRIVATE LLVM)
 
+add_library(
+  IRHotfixFormat STATIC
+  ../../SDK/IRHotfixSDK/Format/HFIR.cpp
+  ../../SDK/IRHotfixSDK/Format/HFPatchContainer.cpp
+)
+target_compile_features(IRHotfixFormat PUBLIC cxx_std_20)
+target_include_directories(
+  IRHotfixFormat
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/Format"
+)
+
+add_executable(HotfixPackageTool Sources/HotfixPackageTool.cpp)
+target_compile_features(HotfixPackageTool PRIVATE cxx_std_20)
+target_link_libraries(HotfixPackageTool PRIVATE IRHotfixFormat)
+
+add_executable(HFIRFormatTests Tests/HFIRFormatTests.cpp)
+target_compile_features(HFIRFormatTests PRIVATE cxx_std_20)
+target_link_libraries(HFIRFormatTests PRIVATE IRHotfixFormat)
+
 set(
   HOTFIX_PASS_OUTPUT_DIRECTORY
   "${CMAKE_CURRENT_SOURCE_DIR}/.build"
@@ -59,6 +78,18 @@ set_target_properties(
 
 set_target_properties(
   HotfixPatchTool
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(
+  HotfixPackageTool
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(
+  HFIRFormatTests
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
 )

@@ -15,6 +15,12 @@ IRHotfixSDK/
 │   ├── Hotfix.swift
 │   ├── HotfixPatchAnnotation.swift
 │   └── LLVMIRInterpreter.swift
+├── Format/
+│   ├── HFIR.h
+│   ├── HFIR.cpp
+│   ├── HFPatchContainer.h
+│   ├── HFPatchContainer.cpp
+│   └── HFIRFormat.md
 ├── Bridge/
 │   ├── IRHotfixObjCBridge.h
 │   ├── IRHotfixObjCBridge.mm
@@ -34,6 +40,10 @@ IRHotfixSDK/
   `@HotfixPatch` marker used to select changed functions on a patch branch.
 - `Runtime/LLVMIRInterpreter.swift` parses and executes the supported LLVM IR
   subset and owns structured host handles for objects, selectors, and classes.
+- `Format/` defines typed HFIR v1, the deterministic `.hfpatch` v1 container,
+  semantic validation, binary encoding/decoding, and human-readable dumping.
+  It is C++20 with no LLVM dependency so the same code can run in host tools
+  and the future iOS VM.
 - `Bridge/IRHotfixObjCBridge.h` exposes a stable C ABI to Swift and future VM
   cores.
 - `Bridge/IRHotfixObjCBridge.mm` resolves Objective-C method signatures at
