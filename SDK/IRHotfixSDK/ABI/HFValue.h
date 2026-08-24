@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "HFHandle.h"
+
 typedef uint32_t HFValueKind;
 enum {
     HFValueKindInvalid = 0,
@@ -21,18 +23,17 @@ enum {
 typedef uint32_t HFValueFlags;
 enum {
     HFValueFlagNone = 0,
-    /// The adapter guarantees this address remains valid through the complete
-    /// patch invocation that contains the host call. It transfers no ownership.
+    /// The encoded table handle remains registered elsewhere for the duration
+    /// of the host call. It transfers no handle-table ownership.
     HFValueFlagBorrowedHostHandle = 1u << 0,
-    /// Ownership of one Objective-C-compatible retain is transferred to the
-    /// VM. The VM releases it with the Objective-C runtime. Never apply this
-    /// flag to an unmanaged C or C++ pointer.
+    /// Ownership of the encoded handle-table entry is transferred to the VM.
+    /// The VM releases the handle entry instead of releasing a raw pointer.
     HFValueFlagRetainedHostHandle = 1u << 1,
 };
 
-/// A null host handle is encoded as `HFValueKindHostHandle` with zero `bits`
-/// and `HFValueFlagNone`; non-null handles must declare borrowed or retained
-/// ownership.
+/// Host handles preserve the fixed 32-byte HFValue ABI. `bits` stores the
+/// opaque handle token and `byteCount` stores generation/kind/flags. `bytes`
+/// is always null. The payload must be decoded with HFValueGetHostHandle.
 
 typedef struct HFValue {
     HFValueKind kind;
@@ -47,6 +48,40 @@ typedef struct HFValue {
 static inline HFValue HFMakeValue(HFValueKind kind, uint64_t bits) {
     HFValue value = {kind, HFValueFlagNone, bits, NULL, 0};
     return value;
+}
+
+static inline HFValue HFValueFromHostHandle(HFHandle handle,
+                                             HFValueFlags ownership) {
+    HFValue value = HFMakeValue(HFValueKindHostHandle, handle.token);
+    value.flags = handle.token == 0 ? HFValueFlagNone : ownership;
+    value.byteCount = ((uint64_t)handle.generation << 32) |
+                      ((uint64_t)handle.kind << 16) |
+                      (uint64_t)handle.flags;
+    return value;
+}
+
+static inline int HFValueGetHostHandle(const HFValue *value,
+                                       HFHandle *handle) {
+    if (value == NULL || handle == NULL ||
+        value->kind != HFValueKindHostHandle || value->bytes != NULL) {
+        return 0;
+    }
+    if (value->bits == 0) {
+        if (value->flags != HFValueFlagNone || value->byteCount != 0) {
+            return 0;
+        }
+        *handle = HFInvalidHandle();
+        return 1;
+    }
+    if (value->flags != HFValueFlagBorrowedHostHandle &&
+        value->flags != HFValueFlagRetainedHostHandle) {
+        return 0;
+    }
+    handle->token = value->bits;
+    handle->generation = (uint32_t)(value->byteCount >> 32);
+    handle->kind = (HFHandleKind)((value->byteCount >> 16) & 0xffffu);
+    handle->flags = (HFHandleFlags)(value->byteCount & 0xffffu);
+    return handle->generation != 0 && handle->kind != HFHandleKindInvalid;
 }
 
 #if defined(__cplusplus)

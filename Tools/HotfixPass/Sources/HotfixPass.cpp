@@ -55,11 +55,15 @@ uint64_t fnv1a64(StringRef text) {
 }
 
 bool isScalar(Type *type) {
-  return type->isIntegerTy(64) || type->isIntegerTy(1);
+  return type->isIntegerTy(64) || type->isIntegerTy(1) ||
+         type->isFloatTy() || type->isDoubleTy();
 }
 
 StringRef scalarName(Type *type) {
-  return type->isIntegerTy(64) ? "i64" : "i1";
+  if (type->isIntegerTy(64)) return "i64";
+  if (type->isIntegerTy(1)) return "i1";
+  if (type->isFloatTy()) return "f32";
+  return "f64";
 }
 
 std::string canonicalSignature(const Function &function,
@@ -264,6 +268,23 @@ FunctionCallee getRuntimeInvoke(Module &module) {
   return module.getOrInsertFunction("hf_vm_invoke", type);
 }
 
+FunctionCallee getHostHandleScopeBegin(Module &module) {
+  LLVMContext &context = module.getContext();
+  Type *i32 = Type::getInt32Ty(context);
+  Type *i16 = Type::getInt16Ty(context);
+  Type *pointer = PointerType::getUnqual(context);
+  FunctionType *type = FunctionType::get(i32, {pointer, i16, pointer}, false);
+  return module.getOrInsertFunction("hf_host_handle_scope_begin", type);
+}
+
+FunctionCallee getHostHandleScopeEnd(Module &module) {
+  LLVMContext &context = module.getContext();
+  Type *i32 = Type::getInt32Ty(context);
+  Type *pointer = PointerType::getUnqual(context);
+  FunctionType *type = FunctionType::get(i32, {pointer}, false);
+  return module.getOrInsertFunction("hf_host_handle_scope_end_ref", type);
+}
+
 Function *cloneOriginal(Function &function) {
   GlobalValue::LinkageTypes originalLinkage = function.getLinkage();
   bool originalDSOLocal = function.isDSOLocal();
@@ -317,7 +338,10 @@ void prepareTrampolineAttributes(Function &function) {
 }
 
 uint32_t scalarKind(Type *type) {
-  return type->isIntegerTy(64) ? HFValueKindSignedInteger : HFValueKindBool;
+  if (type->isIntegerTy(64)) return HFValueKindSignedInteger;
+  if (type->isIntegerTy(1)) return HFValueKindBool;
+  if (type->isFloatTy()) return HFValueKindFloat32;
+  return HFValueKindFloat64;
 }
 
 uint32_t returnKind(Type *type) {
@@ -325,7 +349,15 @@ uint32_t returnKind(Type *type) {
     return HFValueKindSignedInteger;
   if (type->isIntegerTy(1))
     return HFValueKindBool;
+  if (type->isFloatTy())
+    return HFValueKindFloat32;
+  if (type->isDoubleTy())
+    return HFValueKindFloat64;
   return HFValueKindVoid;
+}
+
+uint32_t frameScalarKind(Type *type) {
+  return type->isFloatTy() ? HFValueKindFloat64 : scalarKind(type);
 }
 
 GlobalVariable *createDescriptor(Function &function, const FunctionShape &shape,
@@ -387,7 +419,9 @@ struct InstrumentedFunction {
 };
 
 InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
-                                FunctionCallee runtimeInvoke) {
+                                FunctionCallee runtimeInvoke,
+                                FunctionCallee handleScopeBegin,
+                                FunctionCallee handleScopeEnd) {
   Module &module = *function.getParent();
   LLVMContext &context = module.getContext();
   GlobalValue::LinkageTypes originalLinkage = function.getLinkage();
@@ -436,7 +470,7 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
       Value *slot = builder.CreateInBoundsGEP(
           argumentsType, arguments, indices, "hotfix.argument");
       builder.CreateStore(
-          builder.getInt32(scalarKind(argument->getType())),
+          builder.getInt32(frameScalarKind(argument->getType())),
           builder.CreateStructGEP(valueType, slot, 0,
                                   "hotfix.argument.kind"));
       builder.CreateStore(
@@ -448,6 +482,15 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
       if (argument->getType()->isIntegerTy(1))
         encoded =
             builder.CreateZExt(argument, i64, "hotfix.argument.bits.value");
+      else if (argument->getType()->isFloatTy()) {
+        Value *asDouble = builder.CreateFPExt(
+            argument, builder.getDoubleTy(), "hotfix.argument.float_as_double");
+        encoded = builder.CreateBitCast(
+            asDouble, i64, "hotfix.argument.float64_bits");
+      } else if (argument->getType()->isDoubleTy()) {
+        encoded = builder.CreateBitCast(
+            argument, i64, "hotfix.argument.float64_bits");
+      }
       StoreInst *bitsStore = builder.CreateStore(
           encoded, builder.CreateStructGEP(valueType, slot, 2,
                                             "hotfix.argument.bits"));
@@ -499,30 +542,22 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
 
   Value *receiverSlot =
       builder.CreateStructGEP(frameType, frame, 7, "hotfix.frame.receiver");
-  Value *receiverToken = builder.getInt64(0);
-  if (shape.receiver != nullptr)
-    receiverToken = builder.CreatePtrToInt(shape.receiver, i64,
-                                           "hotfix.receiver.token");
-  StoreInst *tokenStore = builder.CreateStore(
-      receiverToken,
-      builder.CreateStructGEP(handleType, receiverSlot, 0,
-                              "hotfix.receiver.handle_token"));
-  tokenStore->setAlignment(Align(8));
-  builder.CreateStore(
-      builder.getInt32(0),
-      builder.CreateStructGEP(handleType, receiverSlot, 1,
-                              "hotfix.receiver.generation"));
-  builder.CreateStore(
-      builder.getInt16(shape.receiver == nullptr ? HFHandleKindInvalid
-                                                 : HFHandleKindObject),
-      builder.CreateStructGEP(handleType, receiverSlot, 2,
-                              "hotfix.receiver.kind"));
-  builder.CreateStore(
-      builder.getInt16(shape.receiver == nullptr
-                           ? HFHandleFlagNone
-                           : HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress),
-      builder.CreateStructGEP(handleType, receiverSlot, 3,
-                              "hotfix.receiver.flags"));
+  AllocaInst *receiverHandle = nullptr;
+  if (shape.receiver != nullptr) {
+    receiverHandle = builder.CreateAlloca(
+        handleType, nullptr, "hotfix.receiver.handle");
+    receiverHandle->setAlignment(Align(8));
+    builder.CreateCall(
+        handleScopeBegin,
+        {shape.receiver, builder.getInt16(HFHandleKindObject), receiverHandle},
+        "hotfix.receiver.scope_status");
+    LoadInst *loadedHandle = builder.CreateLoad(
+        handleType, receiverHandle, "hotfix.receiver.scoped_handle");
+    loadedHandle->setAlignment(Align(8));
+    builder.CreateStore(loadedHandle, receiverSlot);
+  } else {
+    builder.CreateStore(Constant::getNullValue(handleType), receiverSlot);
+  }
 
   Value *resultSlot =
       builder.CreateStructGEP(frameType, frame, 8, "hotfix.frame.result");
@@ -557,6 +592,8 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
 
   CallInst *status =
       builder.CreateCall(runtimeInvoke, {frame}, "hotfix.status");
+  if (receiverHandle != nullptr)
+    builder.CreateCall(handleScopeEnd, {receiverHandle});
   Value *applied = builder.CreateICmpEQ(
       status, builder.getInt32(HFStatusApplied), "hotfix.applied");
   builder.CreateCondBr(applied, patched, notApplied);
@@ -590,6 +627,15 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
     if (function.getReturnType()->isIntegerTy(1))
       result = builder.CreateTrunc(loaded, builder.getInt1Ty(),
                                    "hotfix.result.boolean");
+    else if (function.getReturnType()->isDoubleTy())
+      result = builder.CreateBitCast(loaded, builder.getDoubleTy(),
+                                     "hotfix.result.float64");
+    else if (function.getReturnType()->isFloatTy()) {
+      Value *asDouble = builder.CreateBitCast(
+          loaded, builder.getDoubleTy(), "hotfix.result.float64");
+      result = builder.CreateFPTrunc(asDouble, builder.getFloatTy(),
+                                     "hotfix.result.float32");
+    }
     builder.CreateRet(result);
   }
 
@@ -642,13 +688,16 @@ public:
 
     if (!eligibleFunctions.empty()) {
       FunctionCallee runtimeInvoke = getRuntimeInvoke(module);
+      FunctionCallee handleScopeBegin = getHostHandleScopeBegin(module);
+      FunctionCallee handleScopeEnd = getHostHandleScopeEnd(module);
       SmallVector<GlobalValue *> retainedFunctions;
       SmallVector<GlobalValue *> retainedDescriptors;
       retainedFunctions.reserve(eligibleFunctions.size() * 2);
       retainedDescriptors.reserve(eligibleFunctions.size());
       for (EligibleFunction &eligible : eligibleFunctions) {
         InstrumentedFunction instrumented =
-            instrument(*eligible.function, eligible.shape, runtimeInvoke);
+            instrument(*eligible.function, eligible.shape, runtimeInvoke,
+                       handleScopeBegin, handleScopeEnd);
         retainedFunctions.push_back(eligible.function);
         retainedFunctions.push_back(instrumented.clone);
         retainedDescriptors.push_back(instrumented.descriptor);

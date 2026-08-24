@@ -7,7 +7,7 @@
 #include "HFStatus.h"
 #include "HFValue.h"
 
-#define HF_ABI_VERSION 2u
+#define HF_ABI_VERSION 3u
 #define HF_MAX_SCALAR_ARGUMENT_COUNT 8u
 
 typedef uint32_t HFPatchFrameFlags;

@@ -2,6 +2,7 @@
 #define IRHotfixSDK_HFHostAdapter_hpp
 
 #include "HFHostAdapter.h"
+#include "../HostHandle/HFHostHandleTable.h"
 
 #include <array>
 #include <bit>
@@ -73,31 +74,41 @@ template <> struct ValueCodec<double> {
 template <> struct ValueCodec<void *> {
   static constexpr HFValueKind kind = HFValueKindHostHandle;
   static bool decode(const HFValue &value, void *&output) {
-    output = reinterpret_cast<void *>(static_cast<std::uintptr_t>(value.bits));
-    return value.kind == kind;
+    HFHandle handle = HFInvalidHandle();
+    if (!HFValueGetHostHandle(&value, &handle))
+      return false;
+    if (handle.token == 0) {
+      output = nullptr;
+      return true;
+    }
+    HFHostHandleLease *lease = nullptr;
+    const HFStatus status =
+        hf_host_handle_resolve(handle, &lease, &output);
+    hf_host_handle_lease_release(lease);
+    return status == HFStatusApplied;
   }
   static HFValue encode(void *value) {
-    HFValue encoded = HFMakeValue(
-        kind, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(value)));
-    encoded.flags = value == nullptr ? HFValueFlagNone
-                                     : HFValueFlagBorrowedHostHandle;
-    return encoded;
+    if (value == nullptr)
+      return HFValueFromHostHandle(HFInvalidHandle(), HFValueFlagNone);
+    HFHandle handle = HFInvalidHandle();
+    if (hf_host_handle_register(value, HFHandleKindNativeSymbol,
+                                HFHostHandleOwnershipStrong,
+                                &handle) != HFStatusApplied)
+      return HFMakeValue(HFValueKindInvalid, 0);
+    return HFValueFromHostHandle(handle, HFValueFlagRetainedHostHandle);
   }
 };
 
 template <> struct ValueCodec<const void *> {
   static constexpr HFValueKind kind = HFValueKindHostHandle;
   static bool decode(const HFValue &value, const void *&output) {
-    output = reinterpret_cast<const void *>(
-        static_cast<std::uintptr_t>(value.bits));
-    return value.kind == kind;
+    void *mutableOutput = nullptr;
+    const bool decoded = ValueCodec<void *>::decode(value, mutableOutput);
+    output = mutableOutput;
+    return decoded;
   }
   static HFValue encode(const void *value) {
-    HFValue encoded = HFMakeValue(
-        kind, static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(value)));
-    encoded.flags = value == nullptr ? HFValueFlagNone
-                                     : HFValueFlagBorrowedHostHandle;
-    return encoded;
+    return ValueCodec<void *>::encode(const_cast<void *>(value));
   }
 };
 
@@ -222,8 +233,17 @@ HFStatus methodEntry(HFHostCallFrame *frame) {
     return HFStatusInvalidFrame;
   auto *context = static_cast<MethodContext<Class, Result, Arguments...> *>(
       frame->context);
-  auto *object = reinterpret_cast<Class *>(
-      static_cast<std::uintptr_t>(frame->receiver.token));
+  HFHostHandleLease *receiverLease = nullptr;
+  void *receiverValue = nullptr;
+  const HFStatus receiverStatus = hf_host_handle_resolve(
+      frame->receiver, &receiverLease, &receiverValue);
+  if (receiverStatus != HFStatusApplied)
+    return receiverStatus;
+  struct LeaseGuard {
+    HFHostHandleLease *lease;
+    ~LeaseGuard() { hf_host_handle_lease_release(lease); }
+  } guard{receiverLease};
+  auto *object = static_cast<Class *>(receiverValue);
   std::tuple<Canonical<Arguments>...> decoded;
   if (!decodeArguments<Arguments...>(
           *frame, decoded, std::index_sequence_for<Arguments...>{}))

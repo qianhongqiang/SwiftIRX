@@ -6,7 +6,7 @@
 
 #include "../ABI/HFPatchFrame.h"
 
-#define HF_HOST_ADAPTER_ABI_VERSION 1u
+#define HF_HOST_ADAPTER_ABI_VERSION 2u
 #define HF_MAX_HOST_ARGUMENT_COUNT 16u
 
 typedef uint32_t HFHostLanguage;
@@ -31,8 +31,8 @@ enum {
     HFHostCallFlagNone = 0,
     HFHostCallFlagHasReceiver = 1u << 0,
     HFHostCallFlagMainThreadOnly = 1u << 1,
-    /// Retained HostHandle results use Objective-C-compatible ownership and
-    /// may be released by the VM through the Objective-C runtime.
+    /// Retained HostHandle results refer to table entries backed by
+    /// Objective-C-compatible objects.
     HFHostCallFlagObjCCompatibleHandles = 1u << 2,
     /// The adapter does not mutate externally visible host state, including
     /// when it returns a failure. This permits safe native fallback.

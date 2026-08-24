@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -133,16 +134,17 @@ const Function *directCallee(const CallBase &call) {
 
 class FunctionLowerer {
 public:
-  FunctionLowerer(Module &, Function &function, std::uint64_t targetID,
-                  std::uint64_t signatureID)
-      : function_(function) {
-    package_.abiVersion = HF_ABI_VERSION;
-    package_.patchID = "hfir." + utohexstr(targetID, true, 16);
-    package_.target = {targetID, signatureID, 0};
-    output_.name = "patch";
+  FunctionLowerer(
+      Function &function, hfir::Package &package, std::uint32_t functionIndex,
+      const std::unordered_map<const Function *, std::uint32_t> &functionIndices)
+      : function_(function), package_(package), functionIndex_(functionIndex),
+        functionIndices_(functionIndices) {
+    output_.name = functionIndex == 0
+        ? "patch"
+        : "helper." + std::to_string(functionIndex);
   }
 
-  bool run(hfir::Package &package, std::string &error) {
+  bool run(std::string &error) {
     error_ = &error;
     error.clear();
     if (!prepare())
@@ -157,11 +159,7 @@ public:
       }
       output_.blocks.push_back(std::move(lowered));
     }
-    package_.functions.push_back(std::move(output_));
-    std::string verificationError;
-    if (!hfir::verify(package_, verificationError))
-      return fail("generated invalid HFIR: " + verificationError);
-    package = std::move(package_);
+    package_.functions[functionIndex_] = std::move(output_);
     return true;
   }
 
@@ -189,25 +187,136 @@ private:
       for (Instruction &instruction : block) {
         if (auto *allocation = dyn_cast<AllocaInst>(&instruction)) {
           const auto type = typeForLLVM(allocation->getAllocatedType());
-          if (!type)
+          if (type) {
+            const std::uint32_t index =
+                static_cast<std::uint32_t>(output_.localTypes.size());
+            locals_[allocation] = index;
+            localPointers_[allocation] = index;
+            allocationLocals_[allocation].push_back(index);
+            output_.localTypes.push_back(*type);
+          } else if (allocation->getAllocatedType()->isAggregateType()) {
+            aggregateAllocations_.insert(allocation);
+          } else {
             return fail(instruction, "unsupported alloca type");
-          locals_[allocation] = static_cast<std::uint32_t>(output_.localTypes.size());
-          output_.localTypes.push_back(*type);
+          }
           continue;
+        }
+        if (auto *gep = dyn_cast<GetElementPtrInst>(&instruction)) {
+          auto *allocation = aggregateRoot(gep);
+          if (allocation != nullptr && aggregateAllocations_.contains(allocation))
+            continue;
         }
         const auto type = semanticType(&instruction);
         if (type && needsRegister(instruction))
           assignRegister(&instruction, *type);
       }
     }
+    for (BasicBlock &block : function_) {
+      for (Instruction &instruction : block) {
+        Value *memoryPointer = nullptr;
+        Type *memoryType = nullptr;
+        if (auto *store = dyn_cast<StoreInst>(&instruction)) {
+          memoryPointer = store->getPointerOperand()->stripPointerCasts();
+          memoryType = store->getValueOperand()->getType();
+        } else if (auto *load = dyn_cast<LoadInst>(&instruction)) {
+          memoryPointer = load->getPointerOperand()->stripPointerCasts();
+          memoryType = load->getType();
+        }
+        if (const auto *allocation = aggregateRoot(memoryPointer);
+            allocation != nullptr && aggregateAllocations_.contains(allocation)) {
+          const auto fieldType = typeForLLVM(memoryType);
+          if (!fieldType || *fieldType == hfir::ValueType::Void)
+            return fail(instruction, "unsupported aggregate root access");
+          std::string key = allocation->getName().str();
+          std::vector<const GetElementPtrInst *> memoryChain;
+          const Value *memoryCursor = memoryPointer;
+          while (const auto *element =
+                     dyn_cast_or_null<GetElementPtrInst>(memoryCursor)) {
+            memoryChain.push_back(element);
+            memoryCursor = element->getPointerOperand()->stripPointerCasts();
+          }
+          if (memoryChain.empty()) {
+            key += ".0.0";
+          } else {
+            for (auto element = memoryChain.rbegin();
+                 element != memoryChain.rend(); ++element) {
+              for (Value *index : (*element)->indices()) {
+                const auto *constant = dyn_cast<ConstantInt>(index);
+                if (constant == nullptr)
+                  return fail(instruction,
+                              "dynamic aggregate field index is unsupported");
+                key += "." + std::to_string(constant->getSExtValue());
+              }
+            }
+          }
+          std::uint32_t local = 0;
+          if (const auto found = aggregateFieldLocals_.find(key);
+              found != aggregateFieldLocals_.end()) {
+            local = found->second;
+          } else {
+            local = static_cast<std::uint32_t>(output_.localTypes.size());
+            output_.localTypes.push_back(*fieldType);
+            aggregateFieldLocals_[key] = local;
+            allocationLocals_[allocation].push_back(local);
+          }
+          localPointers_[memoryPointer] = local;
+        }
+        auto *gep = dyn_cast<GetElementPtrInst>(&instruction);
+        if (gep == nullptr)
+          continue;
+        auto *allocation = aggregateRoot(gep);
+        if (allocation == nullptr || !aggregateAllocations_.contains(allocation))
+          continue;
+        const auto elementType = typeForLLVM(gep->getResultElementType());
+        std::string key = allocation->getName().str();
+        std::vector<const GetElementPtrInst *> chain;
+        const Value *cursor = gep;
+        while (const auto *element = dyn_cast<GetElementPtrInst>(cursor)) {
+          chain.push_back(element);
+          cursor = element->getPointerOperand()->stripPointerCasts();
+        }
+        for (auto element = chain.rbegin(); element != chain.rend(); ++element) {
+          for (Value *index : (*element)->indices()) {
+            const auto *constant = dyn_cast<ConstantInt>(index);
+            if (constant == nullptr)
+              return fail(instruction,
+                          "dynamic aggregate field index is unsupported");
+            key += "." + std::to_string(constant->getSExtValue());
+          }
+        }
+        if (!elementType || *elementType == hfir::ValueType::Void) {
+          if (gep->getResultElementType()->isAggregateType())
+            continue;
+          return fail(instruction, "unsupported aggregate field type");
+        }
+        std::uint32_t local = 0;
+        if (const auto found = aggregateFieldLocals_.find(key);
+            found != aggregateFieldLocals_.end()) {
+          local = found->second;
+        } else {
+          local = static_cast<std::uint32_t>(output_.localTypes.size());
+          output_.localTypes.push_back(*elementType);
+          aggregateFieldLocals_[key] = local;
+          allocationLocals_[allocation].push_back(local);
+        }
+        localPointers_[gep] = local;
+      }
+    }
     return true;
+  }
+
+  const AllocaInst *aggregateRoot(const Value *value) const {
+    value = value == nullptr ? nullptr : value->stripPointerCasts();
+    while (const auto *gep = dyn_cast_or_null<GetElementPtrInst>(value))
+      value = gep->getPointerOperand()->stripPointerCasts();
+    return dyn_cast_or_null<AllocaInst>(value);
   }
 
   std::optional<hfir::ValueType> typeForLLVM(Type *type) const {
     if (type->isVoidTy()) return hfir::ValueType::Void;
     if (type->isIntegerTy(1)) return hfir::ValueType::Bool;
     if (type->isIntegerTy()) return hfir::ValueType::I64;
-    if (type->isDoubleTy()) return hfir::ValueType::F64;
+    if (type->isFloatTy() || type->isDoubleTy()) return hfir::ValueType::F64;
     if (type->isPointerTy()) return hfir::ValueType::Handle;
     return std::nullopt;
   }
@@ -225,6 +334,8 @@ private:
       const StringRef name = callee == nullptr ? StringRef() : callee->getName();
       if (name.contains("_bridgeToObjectiveC"))
         type = hfir::ValueType::String;
+      else if (name.contains("SS1poi") || name.contains("StringV1poi"))
+        type = hfir::ValueType::String;
       else if (name.contains("objc.retain") ||
                name.contains("retainAutoreleasedReturnValue") ||
                name == "objc_opt_self")
@@ -237,13 +348,19 @@ private:
         const StringRef name = callee == nullptr ? StringRef() : callee->getName();
         if (name.contains("_builtinStringLiteral"))
           type = hfir::ValueType::String;
+        else if (name.contains("SS1poi") || name.contains("StringV1poi"))
+          type = hfir::ValueType::String;
         else if (name.ends_with("CMa"))
           type = hfir::ValueType::Handle;
       }
       if (!type)
         type = typeForLLVM(value->getType());
     } else if (auto *cast = dyn_cast<CastInst>(value)) {
-      type = semanticType(cast->getOperand(0));
+      if (cast->getType()->isPointerTy() ||
+          cast->getOperand(0)->getType()->isPointerTy())
+        type = semanticType(cast->getOperand(0));
+      else
+        type = typeForLLVM(cast->getType());
     } else if (auto *phi = dyn_cast<PHINode>(value)) {
       for (Value *incoming : phi->incoming_values()) {
         const auto incomingType = semanticType(incoming);
@@ -256,10 +373,13 @@ private:
       if (!type)
         type = typeForLLVM(value->getType());
     } else if (auto *load = dyn_cast<LoadInst>(value)) {
-      if (const auto *allocation =
-              dyn_cast<AllocaInst>(load->getPointerOperand()->stripPointerCasts()))
-        type = output_.localTypes[locals_.at(allocation)];
-      else if (!selectorFromGlobal(load).empty())
+      if (const auto *allocation = dyn_cast<AllocaInst>(
+              load->getPointerOperand()->stripPointerCasts())) {
+        if (const auto found = locals_.find(allocation); found != locals_.end())
+          type = output_.localTypes[found->second];
+        else
+          type = typeForLLVM(value->getType());
+      } else if (!selectorFromGlobal(load).empty())
         type = std::nullopt;
       else
         type = typeForLLVM(value->getType());
@@ -274,6 +394,8 @@ private:
   bool needsRegister(Instruction &instruction) {
     if (instruction.getType()->isVoidTy() || isa<AllocaInst>(instruction) ||
         instruction.isTerminator())
+      return false;
+    if (localPointers_.contains(&instruction))
       return false;
     if (auto *load = dyn_cast<LoadInst>(&instruction))
       return selectorFromGlobal(load).empty();
@@ -322,6 +444,37 @@ private:
     return std::nullopt;
   }
 
+  std::optional<hfir::Operand> constantOperand(Value *value,
+                                                hfir::ValueType expected) {
+    hfir::Constant constant;
+    if (auto *integer = dyn_cast<ConstantInt>(value)) {
+      if (expected == hfir::ValueType::Handle && integer->isZero())
+        constant = {hfir::ConstantKind::NullHandle, 0, {}};
+      else if (expected == hfir::ValueType::Bool &&
+               integer->getValue().ule(1))
+        constant = {hfir::ConstantKind::Bool, integer->getZExtValue(), {}};
+      else if (expected == hfir::ValueType::I64)
+        constant = {hfir::ConstantKind::I64, integer->getZExtValue(), {}};
+      else
+        return std::nullopt;
+    } else if (auto *floating = dyn_cast<ConstantFP>(value)) {
+      if (expected != hfir::ValueType::F64)
+        return std::nullopt;
+      const double number = floating->getValueAPF().convertToDouble();
+      constant = {hfir::ConstantKind::F64,
+                  std::bit_cast<std::uint64_t>(number), {}};
+    } else if (isa<ConstantPointerNull>(value) &&
+               expected == hfir::ValueType::Handle) {
+      constant = {hfir::ConstantKind::NullHandle, 0, {}};
+    } else {
+      return std::nullopt;
+    }
+    const std::uint32_t index =
+        static_cast<std::uint32_t>(package_.constants.size());
+    package_.constants.push_back(std::move(constant));
+    return hfir::Operand{hfir::OperandKind::Constant, expected, index};
+  }
+
   RegisterValue emitConstant(hfir::Constant constant, hfir::ValueType type,
                              hfir::Opcode opcode = hfir::Opcode::Constant) {
     const std::uint32_t constantIndex =
@@ -352,6 +505,10 @@ private:
 
   hfir::Operand imported(std::uint32_t index) const {
     return {hfir::OperandKind::Import, hfir::ValueType::Void, index};
+  }
+
+  hfir::Operand functionOperand(std::uint32_t index) const {
+    return {hfir::OperandKind::Function, hfir::ValueType::Void, index};
   }
 
   bool emitResult(Instruction &source, hfir::Opcode opcode,
@@ -407,23 +564,31 @@ private:
 
   bool lowerInstruction(Instruction &instruction) {
     if (auto *allocation = dyn_cast<AllocaInst>(&instruction)) {
-      emitEffect(hfir::Opcode::LocalAllocate,
-                 {{hfir::OperandKind::Local,
-                   output_.localTypes[locals_.at(allocation)],
-                   locals_.at(allocation)}});
+      for (std::uint32_t local : allocationLocals_[allocation]) {
+        emitEffect(hfir::Opcode::LocalAllocate,
+                   {{hfir::OperandKind::Local, output_.localTypes[local],
+                     local}});
+      }
       return true;
     }
+    if (auto *gep = dyn_cast<GetElementPtrInst>(&instruction)) {
+      const auto *allocation = aggregateRoot(gep);
+      if (localPointers_.contains(&instruction) ||
+          (allocation != nullptr &&
+           aggregateAllocations_.contains(allocation)))
+        return true;
+    }
     if (auto *store = dyn_cast<StoreInst>(&instruction)) {
-      const auto *allocation =
-          dyn_cast<AllocaInst>(store->getPointerOperand()->stripPointerCasts());
-      if (allocation == nullptr || !locals_.contains(allocation))
+      Value *pointer = store->getPointerOperand()->stripPointerCasts();
+      const auto found = localPointers_.find(pointer);
+      if (found == localPointers_.end())
         return fail(instruction, "only function-local stores are supported");
-      const hfir::ValueType type = output_.localTypes[locals_.at(allocation)];
+      const hfir::ValueType type = output_.localTypes[found->second];
       const auto value = registerFor(store->getValueOperand(), type);
       if (!value)
         return fail(instruction, "cannot lower stored value");
       emitEffect(hfir::Opcode::LocalStore,
-                 {{hfir::OperandKind::Local, type, locals_.at(allocation)},
+                 {{hfir::OperandKind::Local, type, found->second},
                   reg(*value)});
       return true;
     }
@@ -433,23 +598,30 @@ private:
       return lowerBinary(*binary);
     if (auto *comparison = dyn_cast<ICmpInst>(&instruction))
       return lowerComparison(*comparison);
-    if (auto *cast = dyn_cast<CastInst>(&instruction)) {
-      const RegisterValue destination = registers_.at(cast);
-      const auto source = registerFor(cast->getOperand(0), destination.type);
-      return source ? emitResult(*cast, hfir::Opcode::Move, {reg(*source)})
-                    : fail(instruction, "cannot lower cast source");
-    }
+    if (auto *comparison = dyn_cast<FCmpInst>(&instruction))
+      return lowerFloatComparison(*comparison);
+    if (auto *cast = dyn_cast<CastInst>(&instruction))
+      return lowerCast(*cast);
+    if (auto *select = dyn_cast<SelectInst>(&instruction))
+      return lowerSelect(*select);
     if (auto *extract = dyn_cast<ExtractValueInst>(&instruction))
       return lowerExtract(*extract);
     if (auto *phi = dyn_cast<PHINode>(&instruction)) {
       const RegisterValue destination = registers_.at(phi);
       std::vector<hfir::Operand> operands;
       for (unsigned index = 0; index < phi->getNumIncomingValues(); ++index) {
-        const auto incoming =
-            registerFor(phi->getIncomingValue(index), destination.type);
-        if (!incoming)
-          return fail(instruction, "cannot lower phi incoming value");
-        operands.push_back(reg(*incoming));
+        Value *incomingValue = phi->getIncomingValue(index);
+        if (isa<Constant>(incomingValue)) {
+          const auto incoming = constantOperand(incomingValue, destination.type);
+          if (!incoming)
+            return fail(instruction, "cannot lower phi constant");
+          operands.push_back(*incoming);
+        } else {
+          const auto incoming = registerFor(incomingValue, destination.type);
+          if (!incoming)
+            return fail(instruction, "cannot lower phi incoming value");
+          operands.push_back(reg(*incoming));
+        }
         operands.push_back(block(phi->getIncomingBlock(index)));
       }
       return emitResult(*phi, hfir::Opcode::Phi, std::move(operands));
@@ -468,6 +640,26 @@ private:
                    {reg(*condition), block(branch->getSuccessor(0)),
                     block(branch->getSuccessor(1))});
       }
+      return true;
+    }
+    if (auto *switchInstruction = dyn_cast<SwitchInst>(&instruction)) {
+      const hfir::ValueType type = switchInstruction->getCondition()
+                                             ->getType()->isIntegerTy(1)
+                                         ? hfir::ValueType::Bool
+                                         : hfir::ValueType::I64;
+      const auto condition = registerFor(switchInstruction->getCondition(), type);
+      if (!condition)
+        return fail(instruction, "cannot lower switch condition");
+      std::vector<hfir::Operand> operands = {
+          reg(*condition), block(switchInstruction->getDefaultDest())};
+      for (const auto &entry : switchInstruction->cases()) {
+        const auto caseValue = constantOperand(entry.getCaseValue(), type);
+        if (!caseValue)
+          return fail(instruction, "cannot lower switch case");
+        operands.push_back(*caseValue);
+        operands.push_back(block(entry.getCaseSuccessor()));
+      }
+      emitEffect(hfir::Opcode::Switch, std::move(operands));
       return true;
     }
     if (auto *returned = dyn_cast<ReturnInst>(&instruction)) {
@@ -492,14 +684,13 @@ private:
   bool lowerLoad(LoadInst &load) {
     if (!selectorFromGlobal(&load).empty())
       return true;
-    if (const auto *allocation =
-            dyn_cast<AllocaInst>(load.getPointerOperand()->stripPointerCasts())) {
-      if (!locals_.contains(allocation))
-        return fail(load, "unknown local load");
+    Value *pointer = load.getPointerOperand()->stripPointerCasts();
+    if (const auto found = localPointers_.find(pointer);
+        found != localPointers_.end()) {
       return emitResult(
           load, hfir::Opcode::LocalLoad,
-          {{hfir::OperandKind::Local, output_.localTypes[locals_.at(allocation)],
-            locals_.at(allocation)}});
+          {{hfir::OperandKind::Local, output_.localTypes[found->second],
+            found->second}});
     }
     const std::string className = classFromGlobal(load.getPointerOperand());
     if (!className.empty()) {
@@ -517,6 +708,15 @@ private:
     case Instruction::Sub: opcode = hfir::Opcode::SubI64; break;
     case Instruction::Mul: opcode = hfir::Opcode::MulI64; break;
     case Instruction::SDiv: opcode = hfir::Opcode::DivI64; break;
+    case Instruction::UDiv: opcode = hfir::Opcode::UDivI64; break;
+    case Instruction::SRem:
+    case Instruction::URem: opcode = hfir::Opcode::RemI64; break;
+    case Instruction::And: opcode = hfir::Opcode::AndI64; break;
+    case Instruction::Or: opcode = hfir::Opcode::OrI64; break;
+    case Instruction::Xor: opcode = hfir::Opcode::XorI64; break;
+    case Instruction::Shl: opcode = hfir::Opcode::ShiftLeftI64; break;
+    case Instruction::AShr: opcode = hfir::Opcode::ShiftRightSignedI64; break;
+    case Instruction::LShr: opcode = hfir::Opcode::ShiftRightUnsignedI64; break;
     case Instruction::FAdd: opcode = hfir::Opcode::AddF64; break;
     case Instruction::FSub: opcode = hfir::Opcode::SubF64; break;
     case Instruction::FMul: opcode = hfir::Opcode::MulF64; break;
@@ -558,10 +758,126 @@ private:
                : fail(comparison, "cannot lower comparison operands");
   }
 
+  bool lowerFloatComparison(FCmpInst &comparison) {
+    hfir::Opcode opcode;
+    switch (comparison.getPredicate()) {
+    case CmpInst::FCMP_OEQ:
+    case CmpInst::FCMP_UEQ: opcode = hfir::Opcode::CompareEqual; break;
+    case CmpInst::FCMP_ONE:
+    case CmpInst::FCMP_UNE: opcode = hfir::Opcode::CompareNotEqual; break;
+    case CmpInst::FCMP_OLT:
+    case CmpInst::FCMP_ULT: opcode = hfir::Opcode::CompareLessThan; break;
+    case CmpInst::FCMP_OLE:
+    case CmpInst::FCMP_ULE: opcode = hfir::Opcode::CompareLessEqual; break;
+    case CmpInst::FCMP_OGT:
+    case CmpInst::FCMP_UGT: opcode = hfir::Opcode::CompareGreaterThan; break;
+    case CmpInst::FCMP_OGE:
+    case CmpInst::FCMP_UGE: opcode = hfir::Opcode::CompareGreaterEqual; break;
+    default: return fail(comparison, "unsupported floating comparison predicate");
+    }
+    const auto left = registerFor(comparison.getOperand(0), hfir::ValueType::F64);
+    const auto right = registerFor(comparison.getOperand(1), hfir::ValueType::F64);
+    return left && right
+               ? emitResult(comparison, opcode, {reg(*left), reg(*right)})
+               : fail(comparison, "cannot lower floating comparison operands");
+  }
+
+  bool lowerCast(CastInst &cast) {
+    const RegisterValue destination = registers_.at(&cast);
+    hfir::Opcode opcode = hfir::Opcode::Move;
+    hfir::ValueType sourceType = destination.type;
+    std::vector<hfir::Operand> operands;
+    switch (cast.getOpcode()) {
+    case Instruction::Trunc:
+      if (cast.getDestTy()->isIntegerTy(1)) {
+        const auto source = registerFor(cast.getOperand(0), hfir::ValueType::I64);
+        const auto zero = registerFor(
+            ConstantInt::get(cast.getOperand(0)->getType(), 0),
+            hfir::ValueType::I64);
+        return source && zero
+                   ? emitResult(cast, hfir::Opcode::CompareNotEqual,
+                                {reg(*source), reg(*zero)})
+                   : fail(cast, "cannot lower integer-to-bool truncation");
+      }
+      opcode = hfir::Opcode::TruncateI64;
+      sourceType = hfir::ValueType::I64;
+      break;
+    case Instruction::SExt:
+      opcode = hfir::Opcode::SignExtendI64;
+      sourceType = cast.getOperand(0)->getType()->isIntegerTy(1)
+                       ? hfir::ValueType::Bool
+                       : hfir::ValueType::I64;
+      break;
+    case Instruction::ZExt:
+      opcode = hfir::Opcode::ZeroExtendI64;
+      sourceType = cast.getOperand(0)->getType()->isIntegerTy(1)
+                       ? hfir::ValueType::Bool
+                       : hfir::ValueType::I64;
+      break;
+    case Instruction::SIToFP:
+      opcode = hfir::Opcode::SignedIntToF64;
+      sourceType = hfir::ValueType::I64;
+      break;
+    case Instruction::UIToFP:
+      opcode = hfir::Opcode::UnsignedIntToF64;
+      sourceType = hfir::ValueType::I64;
+      break;
+    case Instruction::FPToSI:
+      opcode = hfir::Opcode::F64ToSignedInt;
+      sourceType = hfir::ValueType::F64;
+      break;
+    case Instruction::FPToUI:
+      opcode = hfir::Opcode::F64ToUnsignedInt;
+      sourceType = hfir::ValueType::F64;
+      break;
+    case Instruction::FPExt:
+    case Instruction::FPTrunc:
+    case Instruction::BitCast:
+    case Instruction::AddrSpaceCast:
+    case Instruction::PtrToInt:
+    case Instruction::IntToPtr:
+      break;
+    default:
+      return fail(cast, "unsupported cast opcode");
+    }
+    auto source = registerFor(cast.getOperand(0), sourceType);
+    if (!source)
+      return fail(cast, "cannot lower cast source");
+    operands.push_back(reg(*source));
+    if (opcode == hfir::Opcode::TruncateI64 ||
+        opcode == hfir::Opcode::SignExtendI64 ||
+        opcode == hfir::Opcode::ZeroExtendI64) {
+      const unsigned width = opcode == hfir::Opcode::TruncateI64
+          ? cast.getDestTy()->getIntegerBitWidth()
+          : cast.getSrcTy()->getIntegerBitWidth();
+      const auto widthOperand = constantOperand(
+          ConstantInt::get(Type::getInt64Ty(function_.getContext()), width),
+          hfir::ValueType::I64);
+      operands.push_back(*widthOperand);
+    }
+    return emitResult(cast, opcode, std::move(operands));
+  }
+
+  bool lowerSelect(SelectInst &select) {
+    const RegisterValue destination = registers_.at(&select);
+    const auto condition = registerFor(select.getCondition(), hfir::ValueType::Bool);
+    const auto trueValue = registerFor(select.getTrueValue(), destination.type);
+    const auto falseValue = registerFor(select.getFalseValue(), destination.type);
+    return condition && trueValue && falseValue
+               ? emitResult(select, hfir::Opcode::Select,
+                            {reg(*condition), reg(*trueValue), reg(*falseValue)})
+               : fail(select, "cannot lower select operands");
+  }
+
   bool lowerExtract(ExtractValueInst &extract) {
     auto *call = dyn_cast<CallBase>(extract.getAggregateOperand());
     const Function *callee = call == nullptr ? nullptr : directCallee(*call);
     const StringRef name = callee == nullptr ? StringRef() : callee->getName();
+    if ((name.contains("SS1poi") || name.contains("StringV1poi")) &&
+        registers_.contains(call)) {
+      return emitResult(extract, hfir::Opcode::Move,
+                        {reg(registers_.at(call))});
+    }
     if (name.ends_with("CMa")) {
       const std::string className = importedSwiftClassName(name);
       if (className.empty())
@@ -629,6 +945,19 @@ private:
       return source ? emitResult(call, hfir::Opcode::Move, {reg(*source)})
                     : fail(call, "cannot lower Swift string bridge");
     }
+    if (name.contains("SS1poi") || name.contains("StringV1poi")) {
+      if (call.arg_size() < 2)
+        return fail(call, "Swift string concatenation is missing operands");
+      const unsigned rightIndex = call.arg_size() >= 4 ? 2 : 1;
+      const auto left = registerFor(call.getArgOperand(0),
+                                    hfir::ValueType::String);
+      const auto right = registerFor(call.getArgOperand(rightIndex),
+                                     hfir::ValueType::String);
+      return left && right
+                 ? emitResult(call, hfir::Opcode::StringConcat,
+                              {reg(*left), reg(*right)})
+                 : fail(call, "cannot lower Swift string concatenation");
+    }
     if (name.contains("C5frameABSo6CGRectV_tcfC"))
       return lowerFrameConstructor(call, name);
     if (name == "objc_msgSend")
@@ -636,7 +965,35 @@ private:
     if (name.contains("assertionFailure") &&
         isa<UnreachableInst>(call.getParent()->getTerminator()))
       return true;
+    if (!callee->isDeclaration()) {
+      const auto local = functionIndices_.find(callee);
+      if (local != functionIndices_.end())
+        return lowerLocalCall(call, *callee, local->second);
+    }
     return lowerNativeCall(call, *callee);
+  }
+
+  bool lowerLocalCall(CallBase &call, Function &callee,
+                      std::uint32_t functionIndex) {
+    if (call.arg_size() != callee.arg_size())
+      return fail(call, "local helper argument count mismatch");
+    std::vector<hfir::Operand> operands = {functionOperand(functionIndex)};
+    auto parameter = callee.arg_begin();
+    for (Value *argument : call.args()) {
+      const auto type = typeForLLVM(parameter->getType());
+      if (!type || *type == hfir::ValueType::Void)
+        return fail(call, "local helper parameter has no HFIR representation");
+      const auto lowered = registerFor(argument, *type);
+      if (!lowered)
+        return fail(call, "cannot lower local helper argument");
+      operands.push_back(reg(*lowered));
+      ++parameter;
+    }
+    if (callee.getReturnType()->isVoidTy()) {
+      emitEffect(hfir::Opcode::FunctionCall, std::move(operands));
+      return true;
+    }
+    return emitResult(call, hfir::Opcode::FunctionCall, std::move(operands));
   }
 
   bool lowerNativeCall(CallBase &call, Function &callee) {
@@ -743,16 +1100,39 @@ private:
     if (call.arg_size() < 5)
       return fail(call, "frame initializer has an unexpected ABI");
     std::vector<double> values;
+    std::vector<RegisterValue> components;
+    bool allConstant = true;
     for (unsigned index = 0; index < 4; ++index) {
       const auto *constant = dyn_cast<ConstantFP>(call.getArgOperand(index));
-      if (constant == nullptr)
-        return fail(call, "dynamic CGRect initializer is not yet supported");
-      values.push_back(constant->getValueAPF().convertToDouble());
+      if (constant == nullptr) {
+        allConstant = false;
+        const auto component = registerFor(call.getArgOperand(index),
+                                           hfir::ValueType::F64);
+        if (!component)
+          return fail(call, "cannot lower dynamic CGRect component");
+        components.push_back(*component);
+      } else {
+        values.push_back(constant->getValueAPF().convertToDouble());
+        const auto component = registerFor(call.getArgOperand(index),
+                                           hfir::ValueType::F64);
+        if (!component)
+          return fail(call, "cannot lower CGRect constant component");
+        components.push_back(*component);
+      }
     }
-    const std::vector<std::uint8_t> bytes =
-        doubles({values[0], values[1], values[2], values[3]});
-    RegisterValue rectangle = emitConstant(
-        {hfir::ConstantKind::Rect, 0, bytes}, hfir::ValueType::Rect);
+    RegisterValue rectangle;
+    if (allConstant) {
+      const std::vector<std::uint8_t> bytes =
+          doubles({values[0], values[1], values[2], values[3]});
+      rectangle = emitConstant(
+          {hfir::ConstantKind::Rect, 0, bytes}, hfir::ValueType::Rect);
+    } else {
+      rectangle = assignTemporary(hfir::ValueType::Rect);
+      current_->instructions.push_back(
+          {hfir::Opcode::PackRect, rectangle.index, hfir::ValueType::Rect,
+           {reg(components[0]), reg(components[1]), reg(components[2]),
+            reg(components[3])}});
+    }
     const auto objectClass =
         registerFor(call.getArgOperand(call.arg_size() - 1),
                     hfir::ValueType::Handle);
@@ -825,12 +1205,19 @@ private:
   }
 
   Function &function_;
-  hfir::Package package_;
+  hfir::Package &package_;
+  std::uint32_t functionIndex_ = 0;
+  const std::unordered_map<const Function *, std::uint32_t> &functionIndices_;
   hfir::Function output_;
   hfir::BasicBlock *current_ = nullptr;
   std::string *error_ = nullptr;
   std::unordered_map<Value *, RegisterValue> registers_;
   std::unordered_map<const AllocaInst *, std::uint32_t> locals_;
+  std::unordered_map<const Value *, std::uint32_t> localPointers_;
+  std::unordered_map<const AllocaInst *, std::vector<std::uint32_t>>
+      allocationLocals_;
+  std::set<const AllocaInst *> aggregateAllocations_;
+  std::unordered_map<std::string, std::uint32_t> aggregateFieldLocals_;
   std::unordered_map<const BasicBlock *, std::uint32_t> blockIDs_;
   std::unordered_map<Value *, std::optional<hfir::ValueType>> semanticTypes_;
   std::unordered_map<Value *, bool> semanticVisiting_;
@@ -844,8 +1231,50 @@ private:
 bool lowerFunction(Module &module, Function &function, std::uint64_t targetID,
                    std::uint64_t signatureID, hfir::Package &package,
                    std::string &error) {
-  return FunctionLowerer(module, function, targetID, signatureID)
-      .run(package, error);
+  std::vector<Function *> reachable;
+  std::set<Function *> visited;
+  std::vector<Function *> worklist = {&function};
+  while (!worklist.empty()) {
+    Function *current = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(current).second)
+      continue;
+    reachable.push_back(current);
+    for (BasicBlock &block : *current) {
+      for (Instruction &instruction : block) {
+        auto *call = dyn_cast<CallBase>(&instruction);
+        Function *callee = call == nullptr ? nullptr : directCallee(*call);
+        if (callee != nullptr && !callee->isDeclaration() &&
+            !callee->isIntrinsic() &&
+            !callee->getName().contains("__ir_hotfix_patch_anchor_") &&
+            (callee->hasLocalLinkage() ||
+             callee->getName().starts_with("$s13IRHotfixPatch")))
+          worklist.push_back(callee);
+      }
+    }
+  }
+
+  package = {};
+  package.abiVersion = HF_ABI_VERSION;
+  package.patchID = "hfir." + utohexstr(targetID, true, 16);
+  package.target = {targetID, signatureID, 0};
+  package.functions.resize(reachable.size());
+  std::unordered_map<const Function *, std::uint32_t> functionIndices;
+  for (std::size_t index = 0; index < reachable.size(); ++index)
+    functionIndices.emplace(reachable[index], static_cast<std::uint32_t>(index));
+
+  for (std::size_t index = 0; index < reachable.size(); ++index) {
+    if (!FunctionLowerer(*reachable[index], package,
+                         static_cast<std::uint32_t>(index), functionIndices)
+             .run(error))
+      return false;
+  }
+  std::string verificationError;
+  if (!hfir::verify(package, verificationError)) {
+    error = "generated invalid HFIR: " + verificationError;
+    return false;
+  }
+  return true;
 }
 
 } // namespace irhotfix::lowering

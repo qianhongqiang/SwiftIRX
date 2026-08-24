@@ -1,17 +1,17 @@
-# HFIR v1 and `.hfpatch` v1
+# HFIR v2 and `.hfpatch` v1
 
 This directory defines the stable compiler/runtime boundary of IRHotfixSDK.
 LLVM IR and Swift runtime calls are compiler inputs only. They are lowered into
 typed semantic HFIR before a patch is published.
 
-## HFIR v1
+## HFIR v2
 
 HFIR is a typed register IR. A function owns an ordered register type table;
 its parameter registers are the prefix of that table. Every other register has
 exactly one definition. Control flow is represented by numbered basic blocks,
 and every block ends in `branch`, `branch.conditional`, or `return`.
 
-The v1 value types are:
+The v2 value types are:
 
 ```text
 void bool i64 f64 handle string bytes point size rect
@@ -23,16 +23,19 @@ descriptor requests it. Geometry constants use canonical little-endian IEEE
 754 doubles: point and size contain two doubles; rect contains four doubles in
 `x, y, width, height` order.
 
-The v1 instruction families are:
+The v2 instruction families are:
 
 ```text
-nop const move phi
-add/sub/mul/div .i64 and .f64
+nop const move phi select switch
+add/sub/mul/div/rem .i64 and add/sub/mul/div .f64
+and/or/xor/shl/lshr/ashr .i64
 compare.eq/ne/lt/le/gt/ge
 branch branch.conditional return trap
 local.alloc local.load local.store
 object.class object.construct object.invoke object.release
-string.constant function.call host.call
+string.constant string.concat pack.rect function.call host.call
+truncate/sign-extend/zero-extend .i64
+signed/unsigned integer-to-f64 and f64-to-signed/unsigned integer
 ```
 
 Calls do not name Swift runtime functions or raw addresses. `object.*` resolves

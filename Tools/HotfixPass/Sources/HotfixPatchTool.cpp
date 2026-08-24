@@ -58,7 +58,8 @@ bool parseHexID(StringRef text, uint64_t &value) {
 }
 
 bool isValueKind(StringRef kind, bool allowVoid) {
-  return kind == "i64" || kind == "i1" || (allowVoid && kind == "void");
+  return kind == "i64" || kind == "i1" || kind == "f32" || kind == "f64" ||
+         (allowVoid && kind == "void");
 }
 
 std::string canonicalSignature(const Target &target) {
@@ -188,6 +189,10 @@ bool matchesKind(Type *type, StringRef kind) {
     return type->isIntegerTy(64);
   if (kind == "i1")
     return type->isIntegerTy(1);
+  if (kind == "f32")
+    return type->isFloatTy();
+  if (kind == "f64")
+    return type->isDoubleTy();
   return false;
 }
 
@@ -232,26 +237,11 @@ bool validateEntry(Function &entry, const Target &target, std::string &error) {
     ++argument;
   }
 
-  for (BasicBlock &block : entry) {
-    for (Instruction &instruction : block) {
-      const auto *call = dyn_cast<CallBase>(&instruction);
-      if (call == nullptr)
-        continue;
-      const Function *callee = call->getCalledFunction();
-      if (callee != nullptr && callee != &entry && !callee->isDeclaration() &&
-          (callee->hasLocalLinkage() ||
-           callee->getName().starts_with("$s13IRHotfixPatch"))) {
-        error = "hotfixPatch calls local Swift helper '" +
-                callee->getName().str() +
-                "'; inline the helper before building the patch";
-        return false;
-      }
-    }
-  }
   return true;
 }
 
-bool lowerCheckedIntegerArithmetic(Function &entry, std::string &error) {
+bool lowerCheckedIntegerArithmeticInFunction(Function &entry,
+                                             std::string &error) {
   SmallVector<Instruction *, 16> erase;
   for (BasicBlock &block : entry) {
     for (Instruction &instruction : block) {
@@ -317,6 +307,32 @@ bool lowerCheckedIntegerArithmetic(Function &entry, std::string &error) {
   return true;
 }
 
+bool lowerCheckedIntegerArithmetic(Function &entry, std::string &error) {
+  std::set<Function *> visited;
+  std::vector<Function *> worklist = {&entry};
+  while (!worklist.empty()) {
+    Function *function = worklist.back();
+    worklist.pop_back();
+    if (!visited.insert(function).second)
+      continue;
+    for (BasicBlock &block : *function) {
+      for (Instruction &instruction : block) {
+        auto *call = dyn_cast<CallBase>(&instruction);
+        Function *callee = call == nullptr ? nullptr : call->getCalledFunction();
+        if (callee != nullptr && !callee->isDeclaration() &&
+            !callee->isIntrinsic() &&
+            !callee->getName().contains("__ir_hotfix_patch_anchor_") &&
+            (callee->hasLocalLinkage() ||
+             callee->getName().starts_with("$s13IRHotfixPatch")))
+          worklist.push_back(callee);
+      }
+    }
+    if (!lowerCheckedIntegerArithmeticInFunction(*function, error))
+      return false;
+  }
+  return true;
+}
+
 void nameAnonymousBlocks(Function &entry) {
   unsigned blockIndex = 0;
   for (BasicBlock &block : entry) {
@@ -342,6 +358,29 @@ bool writePatch(Function &entry, StringRef outputPath, std::string &error) {
     return false;
   }
   entry.print(output);
+  std::set<const Function *> written = {&entry};
+  std::vector<const Function *> worklist = {&entry};
+  while (!worklist.empty()) {
+    const Function *function = worklist.back();
+    worklist.pop_back();
+    for (const BasicBlock &block : *function) {
+      for (const Instruction &instruction : block) {
+        const auto *call = dyn_cast<CallBase>(&instruction);
+        const Function *callee = call == nullptr ? nullptr
+                                                  : call->getCalledFunction();
+        if (callee == nullptr || callee->isDeclaration() ||
+            callee->isIntrinsic() ||
+            callee->getName().contains("__ir_hotfix_patch_anchor_") ||
+            (!callee->hasLocalLinkage() &&
+             !callee->getName().starts_with("$s13IRHotfixPatch")) ||
+            !written.insert(callee).second)
+          continue;
+        output << "\n\n";
+        callee->print(output);
+        worklist.push_back(callee);
+      }
+    }
+  }
   output.flush();
   if (output.has_error()) {
     error = "cannot write patch output '" + outputPath.str() + "'";

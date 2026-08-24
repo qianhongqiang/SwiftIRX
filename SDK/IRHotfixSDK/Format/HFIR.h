@@ -9,7 +9,7 @@
 
 namespace irhotfix::hfir {
 
-inline constexpr std::uint16_t kVersion = 1;
+inline constexpr std::uint16_t kVersion = 2;
 inline constexpr std::size_t kMaximumHostArgumentCount = 16;
 inline constexpr std::uint32_t kNoRegister =
     std::numeric_limits<std::uint32_t>::max();
@@ -72,6 +72,8 @@ enum class Opcode : std::uint16_t {
   SubF64 = 15,
   MulF64 = 16,
   DivF64 = 17,
+  RemI64 = 18,
+  UDivI64 = 19,
 
   CompareEqual = 20,
   CompareNotEqual = 21,
@@ -79,11 +81,13 @@ enum class Opcode : std::uint16_t {
   CompareLessEqual = 23,
   CompareGreaterThan = 24,
   CompareGreaterEqual = 25,
+  Select = 26,
 
   Branch = 30,
   ConditionalBranch = 31,
   Return = 32,
   Trap = 33,
+  Switch = 34,
 
   LocalAllocate = 40,
   LocalLoad = 41,
@@ -96,6 +100,23 @@ enum class Opcode : std::uint16_t {
   StringConstant = 54,
   FunctionCall = 55,
   HostCall = 56,
+  StringConcat = 57,
+  PackRect = 58,
+
+  TruncateI64 = 60,
+  SignExtendI64 = 61,
+  ZeroExtendI64 = 62,
+  SignedIntToF64 = 63,
+  UnsignedIntToF64 = 64,
+  F64ToSignedInt = 65,
+  F64ToUnsignedInt = 66,
+
+  AndI64 = 70,
+  OrI64 = 71,
+  XorI64 = 72,
+  ShiftLeftI64 = 73,
+  ShiftRightSignedI64 = 74,
+  ShiftRightUnsignedI64 = 75,
 };
 
 struct Constant {
@@ -165,7 +186,7 @@ struct Signature {
 };
 
 struct Package {
-  std::uint32_t abiVersion = 2;
+  std::uint32_t abiVersion = 3;
   std::string patchID;
   TargetDescriptor target;
   std::vector<Constant> constants;

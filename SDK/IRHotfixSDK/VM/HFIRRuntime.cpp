@@ -3,6 +3,7 @@
 #include "../Bridge/IRHotfixObjCBridge.h"
 #include "../Format/HFPatchContainer.h"
 #include "../HostAdapter/HFHostAdapter.h"
+#include "../HostHandle/HFHostHandleTable.h"
 
 #include <atomic>
 #include <bit>
@@ -23,11 +24,24 @@ constexpr std::uint64_t kInstructionBudget = 100'000;
 constexpr std::uint32_t kMaximumCallDepth = 64;
 static_assert(hfir::kMaximumHostArgumentCount == HF_MAX_HOST_ARGUMENT_COUNT);
 
+struct HostHandleLifetime {
+  HFHandle handle = HFInvalidHandle();
+  HFHostHandleLease *lease = nullptr;
+  bool ownsHandle = false;
+
+  ~HostHandleLifetime() {
+    hf_host_handle_lease_release(lease);
+    if (ownsHandle && handle.token != 0)
+      hf_host_handle_release(handle);
+  }
+};
+
 struct VMValue {
   hfir::ValueType type = hfir::ValueType::Void;
   std::uint64_t bits = 0;
   void *object = nullptr;
-  std::shared_ptr<void> lifetime;
+  HFHandle handle = HFInvalidHandle();
+  std::shared_ptr<HostHandleLifetime> lifetime;
   std::vector<std::uint8_t> bytes;
   bool initialized = false;
 
@@ -48,21 +62,35 @@ struct VMValue {
     return value;
   }
 
-  static VMValue borrowedObject(hfir::ValueType type, void *object) {
-    VMValue value;
+  static bool hostObject(hfir::ValueType type, HFHandle handle,
+                         bool ownsHandle, VMValue &value) {
+    value = {};
     value.type = type;
-    value.object = object;
+    value.handle = handle;
     value.initialized = true;
-    return value;
+    if (handle.token == 0) {
+      value.object = nullptr;
+      return true;
+    }
+    auto lifetime = std::make_shared<HostHandleLifetime>();
+    lifetime->handle = handle;
+    lifetime->ownsHandle = ownsHandle;
+    if (hf_host_handle_resolve(handle, &lifetime->lease,
+                               &value.object) != HFStatusApplied)
+      return false;
+    value.lifetime = std::move(lifetime);
+    return true;
   }
 
-  static VMValue retainedObject(hfir::ValueType type, void *object) {
-    VMValue value = borrowedObject(type, object);
-    if (object != nullptr) {
-      value.lifetime = std::shared_ptr<void>(
-          object, [](void *pointer) { IRHFObjCReleaseRetainedObject(pointer); });
-    }
-    return value;
+  static bool adoptRetainedObject(hfir::ValueType type, void *object,
+                                  HFHandleKind kind, VMValue &value) {
+    if (object == nullptr)
+      return hostObject(type, HFInvalidHandle(), false, value);
+    HFHandle handle = HFInvalidHandle();
+    const HFStatus status = hf_host_handle_register(
+        object, kind, HFHostHandleOwnershipStrong, &handle);
+    IRHFObjCReleaseRetainedObject(object);
+    return status == HFStatusApplied && hostObject(type, handle, true, value);
   }
 };
 
@@ -180,10 +208,11 @@ public:
           entry.parameterTypes.front() != hfir::ValueType::Handle ||
           frame.receiver.token == 0)
         return false;
-      arguments.push_back(VMValue::borrowedObject(
-          hfir::ValueType::Handle,
-          reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-              frame.receiver.token))));
+      VMValue receiver;
+      if (!VMValue::hostObject(hfir::ValueType::Handle, frame.receiver, false,
+                               receiver))
+        return false;
+      arguments.push_back(std::move(receiver));
       parameter = 1;
     }
     if (entry.parameterTypes.size() - parameter != frame.argumentCount)
@@ -281,13 +310,41 @@ private:
       for (const hfir::Instruction &instruction : block.instructions) {
         if (budget-- == 0)
           return false;
+        std::vector<VMValue> constantOperands(instruction.operands.size());
         auto operand = [&](std::size_t index) -> const VMValue * {
-          if (index >= instruction.operands.size() ||
-              instruction.operands[index].kind != hfir::OperandKind::Register ||
-              instruction.operands[index].index >= registers.size())
+          if (index >= instruction.operands.size())
             return nullptr;
-          const VMValue &value = registers[instruction.operands[index].index];
-          return value.initialized ? &value : nullptr;
+          const hfir::Operand &source = instruction.operands[index];
+          if (source.kind == hfir::OperandKind::Register) {
+            if (source.index >= registers.size())
+              return nullptr;
+            const VMValue &value = registers[source.index];
+            return value.initialized ? &value : nullptr;
+          }
+          if (source.kind != hfir::OperandKind::Constant ||
+              source.index >= package_.constants.size())
+            return nullptr;
+          const hfir::Constant &constant = package_.constants[source.index];
+          VMValue &value = constantOperands[index];
+          switch (constant.kind) {
+          case hfir::ConstantKind::Bool:
+            value = VMValue::scalar(hfir::ValueType::Bool, constant.bits);
+            break;
+          case hfir::ConstantKind::I64:
+            value = VMValue::scalar(hfir::ValueType::I64, constant.bits);
+            break;
+          case hfir::ConstantKind::F64:
+            value = VMValue::scalar(hfir::ValueType::F64, constant.bits);
+            break;
+          case hfir::ConstantKind::NullHandle:
+            if (!VMValue::hostObject(hfir::ValueType::Handle,
+                                     HFInvalidHandle(), false, value))
+              return nullptr;
+            break;
+          default:
+            return nullptr;
+          }
+          return &value;
         };
         auto assign = [&](VMValue value) {
           if (instruction.result == hfir::kNoRegister ||
@@ -322,7 +379,10 @@ private:
                 constant.bytes.data(), constant.bytes.size());
             if (string == nullptr)
               return false;
-            value = VMValue::retainedObject(hfir::ValueType::String, string);
+            if (!VMValue::adoptRetainedObject(
+                    hfir::ValueType::String, string, HFHandleKindObject,
+                    value))
+              return false;
             value.bytes = constant.bytes;
             break;
           }
@@ -339,7 +399,9 @@ private:
             value = VMValue::aggregate(hfir::ValueType::Rect, constant.bytes);
             break;
           case hfir::ConstantKind::NullHandle:
-            value = VMValue::borrowedObject(hfir::ValueType::Handle, nullptr);
+            if (!VMValue::hostObject(hfir::ValueType::Handle,
+                                     HFInvalidHandle(), false, value))
+              return false;
             break;
           }
           if (!assign(std::move(value)))
@@ -349,6 +411,16 @@ private:
         case hfir::Opcode::Move: {
           const VMValue *source = operand(0);
           if (source == nullptr || !assign(*source))
+            return false;
+          break;
+        }
+        case hfir::Opcode::Select: {
+          const VMValue *condition = operand(0);
+          const VMValue *selected =
+              condition == nullptr || condition->type != hfir::ValueType::Bool
+                  ? nullptr
+                  : operand(condition->bits ? 1 : 2);
+          if (selected == nullptr || !assign(*selected))
             return false;
           break;
         }
@@ -370,7 +442,15 @@ private:
         case hfir::Opcode::AddI64:
         case hfir::Opcode::SubI64:
         case hfir::Opcode::MulI64:
-        case hfir::Opcode::DivI64: {
+        case hfir::Opcode::DivI64:
+        case hfir::Opcode::RemI64:
+        case hfir::Opcode::UDivI64:
+        case hfir::Opcode::AndI64:
+        case hfir::Opcode::OrI64:
+        case hfir::Opcode::XorI64:
+        case hfir::Opcode::ShiftLeftI64:
+        case hfir::Opcode::ShiftRightSignedI64:
+        case hfir::Opcode::ShiftRightUnsignedI64: {
           const VMValue *left = operand(0);
           const VMValue *right = operand(1);
           if (left == nullptr || right == nullptr)
@@ -382,16 +462,129 @@ private:
             bits = left->bits - right->bits;
           else if (instruction.opcode == hfir::Opcode::MulI64)
             bits = left->bits * right->bits;
-          else {
+          else if (instruction.opcode == hfir::Opcode::DivI64 ||
+                   instruction.opcode == hfir::Opcode::RemI64) {
             const auto divisor = static_cast<std::int64_t>(right->bits);
             const auto dividend = static_cast<std::int64_t>(left->bits);
             if (divisor == 0 ||
                 (dividend == std::numeric_limits<std::int64_t>::min() &&
                  divisor == -1))
               return false;
-            bits = static_cast<std::uint64_t>(dividend / divisor);
+            bits = static_cast<std::uint64_t>(
+                instruction.opcode == hfir::Opcode::DivI64
+                    ? dividend / divisor
+                    : dividend % divisor);
+          } else if (instruction.opcode == hfir::Opcode::UDivI64) {
+            if (right->bits == 0)
+              return false;
+            bits = left->bits / right->bits;
+          } else if (instruction.opcode == hfir::Opcode::AndI64) {
+            bits = left->bits & right->bits;
+          } else if (instruction.opcode == hfir::Opcode::OrI64) {
+            bits = left->bits | right->bits;
+          } else if (instruction.opcode == hfir::Opcode::XorI64) {
+            bits = left->bits ^ right->bits;
+          } else {
+            if (right->bits >= 64)
+              return false;
+            const unsigned shift = static_cast<unsigned>(right->bits);
+            if (instruction.opcode == hfir::Opcode::ShiftLeftI64)
+              bits = left->bits << shift;
+            else if (instruction.opcode == hfir::Opcode::ShiftRightSignedI64)
+              bits = static_cast<std::uint64_t>(
+                  static_cast<std::int64_t>(left->bits) >> shift);
+            else
+              bits = left->bits >> shift;
           }
           if (!assign(VMValue::scalar(hfir::ValueType::I64, bits)))
+            return false;
+          break;
+        }
+        case hfir::Opcode::TruncateI64:
+        case hfir::Opcode::SignExtendI64:
+        case hfir::Opcode::ZeroExtendI64: {
+          const VMValue *source = operand(0);
+          const VMValue *widthValue = operand(1);
+          if (source == nullptr || widthValue == nullptr ||
+              widthValue->bits == 0 || widthValue->bits > 64)
+            return false;
+          const unsigned width = static_cast<unsigned>(widthValue->bits);
+          const std::uint64_t mask = width == 64
+              ? std::numeric_limits<std::uint64_t>::max()
+              : (std::uint64_t{1} << width) - 1;
+          std::uint64_t converted = source->bits & mask;
+          if (instruction.opcode == hfir::Opcode::SignExtendI64 && width < 64 &&
+              (converted & (std::uint64_t{1} << (width - 1))) != 0)
+            converted |= ~mask;
+          if (!assign(VMValue::scalar(hfir::ValueType::I64, converted)))
+            return false;
+          break;
+        }
+        case hfir::Opcode::SignedIntToF64:
+        case hfir::Opcode::UnsignedIntToF64: {
+          const VMValue *source = operand(0);
+          if (source == nullptr)
+            return false;
+          const double converted = instruction.opcode == hfir::Opcode::SignedIntToF64
+              ? static_cast<double>(static_cast<std::int64_t>(source->bits))
+              : static_cast<double>(source->bits);
+          if (!assign(VMValue::scalar(
+                  hfir::ValueType::F64,
+                  std::bit_cast<std::uint64_t>(converted))))
+            return false;
+          break;
+        }
+        case hfir::Opcode::F64ToSignedInt:
+        case hfir::Opcode::F64ToUnsignedInt: {
+          const VMValue *source = operand(0);
+          if (source == nullptr)
+            return false;
+          const double number = std::bit_cast<double>(source->bits);
+          if (!std::isfinite(number))
+            return false;
+          std::uint64_t converted = 0;
+          if (instruction.opcode == hfir::Opcode::F64ToSignedInt) {
+            if (number < -std::ldexp(1.0, 63) ||
+                number >= std::ldexp(1.0, 63))
+              return false;
+            converted = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(number));
+          } else {
+            if (number < 0.0 || number >= std::ldexp(1.0, 64))
+              return false;
+            converted = static_cast<std::uint64_t>(number);
+          }
+          if (!assign(VMValue::scalar(hfir::ValueType::I64, converted)))
+            return false;
+          break;
+        }
+        case hfir::Opcode::PackRect: {
+          std::vector<std::uint8_t> bytes;
+          bytes.reserve(4 * sizeof(double));
+          for (std::size_t index = 0; index < 4; ++index) {
+            const VMValue *component = operand(index);
+            if (component == nullptr || component->type != hfir::ValueType::F64)
+              return false;
+            for (unsigned shift = 0; shift < 64; shift += 8)
+              bytes.push_back(static_cast<std::uint8_t>(component->bits >> shift));
+          }
+          if (!assign(VMValue::aggregate(hfir::ValueType::Rect, bytes)))
+            return false;
+          break;
+        }
+        case hfir::Opcode::StringConcat: {
+          const VMValue *left = operand(0);
+          const VMValue *right = operand(1);
+          if (left == nullptr || right == nullptr || left->object == nullptr ||
+              right->object == nullptr)
+            return false;
+          void *string = IRHFObjCCreateConcatenatedString(left->object,
+                                                          right->object);
+          VMValue concatenated;
+          if (string == nullptr || !VMValue::adoptRetainedObject(
+                                       hfir::ValueType::String, string,
+                                       HFHandleKindObject, concatenated) ||
+              !assign(std::move(concatenated)))
             return false;
           break;
         }
@@ -483,7 +676,7 @@ private:
           const hfir::HostImport &import =
               package_.imports[instruction.operands[0].index];
           VMValue returned;
-          if (!invokeHostImport(import, nullptr, {}, returned) ||
+          if (!invokeHostImport(import, HFInvalidHandle(), {}, returned) ||
               !assign(std::move(returned)))
             return false;
           break;
@@ -494,14 +687,14 @@ private:
           const hfir::HostImport &import =
               package_.imports[instruction.operands[0].index];
           std::size_t cursor = 1;
-          void *receiver = nullptr;
+          HFHandle receiver = HFInvalidHandle();
           if (import.hasReceiver) {
             const VMValue *receiverValue = operand(cursor++);
             if (receiverValue == nullptr ||
                 receiverValue->type != hfir::ValueType::Handle ||
                 receiverValue->object == nullptr)
               return false;
-            receiver = receiverValue->object;
+            receiver = receiverValue->handle;
           }
           std::vector<HFValue> hostArguments;
           hostArguments.reserve(instruction.operands.size() - cursor);
@@ -558,6 +751,26 @@ private:
           transferred = true;
           break;
         }
+        case hfir::Opcode::Switch: {
+          const VMValue *condition = operand(0);
+          if (condition == nullptr)
+            return false;
+          std::uint32_t destination = instruction.operands[1].index;
+          for (std::size_t index = 2; index < instruction.operands.size();
+               index += 2) {
+            const VMValue *caseValue = operand(index);
+            if (caseValue == nullptr)
+              return false;
+            if (caseValue->bits == condition->bits) {
+              destination = instruction.operands[index + 1].index;
+              break;
+            }
+          }
+          predecessor = current;
+          current = destination;
+          transferred = true;
+          break;
+        }
         case hfir::Opcode::Return:
           if (function.returnType == hfir::ValueType::Void) {
             result = VMValue::scalar(hfir::ValueType::Void, 0);
@@ -595,13 +808,13 @@ private:
       result.bits = value.bits;
       return true;
     case hfir::ValueType::Handle:
-    case hfir::ValueType::String:
-      result.kind = HFValueKindHostHandle;
-      result.flags = value.object == nullptr ? HFValueFlagNone
-                                             : HFValueFlagBorrowedHostHandle;
-      result.bits = static_cast<std::uint64_t>(
-          reinterpret_cast<std::uintptr_t>(value.object));
+    case hfir::ValueType::String: {
+      result = HFValueFromHostHandle(
+          value.handle, value.handle.token == 0
+                            ? HFValueFlagNone
+                            : HFValueFlagBorrowedHostHandle);
       return true;
+    }
     case hfir::ValueType::Bytes:
     case hfir::ValueType::Point:
     case hfir::ValueType::Size:
@@ -624,23 +837,16 @@ private:
       result = VMValue::scalar(hfir::ValueType::Void, 0);
       return true;
     case hfir::ValueType::Handle:
-    case hfir::ValueType::String:
+    case hfir::ValueType::String: {
       if (value.kind != HFValueKindHostHandle)
         return false;
-      if (value.bits == 0 && value.flags == HFValueFlagNone) {
-        result = VMValue::borrowedObject(expected, nullptr);
-      } else if (value.flags == HFValueFlagRetainedHostHandle) {
-        result = VMValue::retainedObject(
-            expected, reinterpret_cast<void *>(
-                          static_cast<std::uintptr_t>(value.bits)));
-      } else if (value.flags == HFValueFlagBorrowedHostHandle) {
-        result = VMValue::borrowedObject(
-            expected, reinterpret_cast<void *>(
-                          static_cast<std::uintptr_t>(value.bits)));
-      } else {
+      HFHandle handle = HFInvalidHandle();
+      if (!HFValueGetHostHandle(&value, &handle))
         return false;
-      }
-      return true;
+      return VMValue::hostObject(
+          expected, handle,
+          value.flags == HFValueFlagRetainedHostHandle, result);
+    }
     case hfir::ValueType::Bool:
       if (value.kind != HFValueKindBool || value.bits > 1)
         return false;
@@ -780,7 +986,7 @@ private:
     return true;
   }
 
-  bool invokeHostImport(const hfir::HostImport &import, void *receiver,
+  bool invokeHostImport(const hfir::HostImport &import, HFHandle receiver,
                         const std::vector<HFValue> &arguments,
                         VMValue &returned) {
     std::vector<HFValueKind> argumentKinds;
@@ -790,12 +996,9 @@ private:
 
     HFHandle hostReceiver = HFInvalidHandle();
     if (import.hasReceiver) {
-      if (receiver == nullptr)
+      if (receiver.token == 0)
         return false;
-      hostReceiver.token = static_cast<std::uint64_t>(
-          reinterpret_cast<std::uintptr_t>(receiver));
-      hostReceiver.kind = HFHandleKindObject;
-      hostReceiver.flags = HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress;
+      hostReceiver = receiver;
     }
     HFValue result = HFMakeValue(HFValueKindInvalid, 0);
     HFStatus status = HFStatusExecutionFailed;
@@ -825,8 +1028,9 @@ private:
     if (!unmarshalHostValue(result, import.returnType, returned)) {
       if (result.kind == HFValueKindHostHandle && result.bits != 0 &&
           result.flags == HFValueFlagRetainedHostHandle) {
-        IRHFObjCReleaseRetainedObject(reinterpret_cast<void *>(
-            static_cast<std::uintptr_t>(result.bits)));
+        HFHandle returnedHandle = HFInvalidHandle();
+        if (HFValueGetHostHandle(&result, &returnedHandle))
+          hf_host_handle_release(returnedHandle);
       }
       return false;
     }
@@ -884,10 +1088,8 @@ HFStatus hf_hfir_vm_invoke(HFPatchFrame *frame) {
   const bool hasReceiver =
       (frame->flags & HFPatchFrameFlagHasReceiver) != 0;
   if (hasReceiver) {
-    if (frame->receiver.token == 0 || frame->receiver.generation != 0 ||
-        frame->receiver.kind != HFHandleKindObject ||
-        frame->receiver.flags !=
-            (HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress))
+    if (frame->receiver.kind != HFHandleKindObject ||
+        hf_host_handle_validate(frame->receiver) != HFStatusApplied)
       return finish(frame, HFStatusInvalidFrame);
   } else if (frame->receiver.token != 0 || frame->receiver.generation != 0 ||
              frame->receiver.kind != HFHandleKindInvalid ||

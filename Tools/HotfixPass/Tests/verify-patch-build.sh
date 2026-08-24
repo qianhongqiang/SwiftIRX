@@ -10,6 +10,7 @@ ANNOTATION="$ROOT/SDK/IRHotfixSDK/Runtime/HotfixPatchAnnotation.swift"
 SWIFT="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
 SWIFTC="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
 MANIFEST="$ROOT/Tools/HotfixPass/Tests/fixtures/target_manifest.json"
+FLOATING_MANIFEST="$ROOT/Tools/HotfixPass/Tests/fixtures/floating_target_manifest.json"
 SETUP_UI_MANIFEST="$ROOT/Tools/HotfixPass/Tests/fixtures/setup_ui_manifest.json"
 FIXTURES="$ROOT/Tools/HotfixPass/Tests/fixtures"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/hotfix-patch-build-tests.XXXXXX")"
@@ -115,6 +116,24 @@ if grep -Eq '(^|[^[:alpha:]])(define|declare|llvm\.)|\$s[0-9]' "$TEMP/setup-ui.h
   exit 1
 fi
 
+"$BUILDER" \
+  --manifest "$SETUP_UI_MANIFEST" \
+  --target setupUI \
+  --source "$FIXTURES/patch_string_concat.swift" \
+  --output "$TEMP/string-concat.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/string-concat.hfpatch" >"$TEMP/string-concat.hfir.txt"
+grep -Fq 'string.concat' "$TEMP/string-concat.hfir.txt"
+
+"$BUILDER" \
+  --manifest "$SETUP_UI_MANIFEST" \
+  --target dynamicRectTarget \
+  --source "$FIXTURES/patch_dynamic_rect.swift" \
+  --output "$TEMP/dynamic-rect.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/dynamic-rect.hfpatch" >"$TEMP/dynamic-rect.hfir.txt"
+grep -Fq 'pack.rect' "$TEMP/dynamic-rect.hfir.txt"
+
 if "$BUILDER" \
   --manifest "$MANIFEST" \
   --target integerTarget \
@@ -138,16 +157,58 @@ if "$BUILDER" \
 fi
 grep -Fq "target query 'Target' is ambiguous" "$TEMP/ambiguous.stderr"
 
-if "$BUILDER" \
+"$BUILDER" \
   --manifest "$MANIFEST" \
   --target integerTarget \
   --source "$FIXTURES/patch_local_helper.swift" \
-  --output "$TEMP/helper.irpatch" \
-  2>"$TEMP/helper.stderr"; then
-  echo "error: patch builder accepted a non-inlined local helper" >&2
-  exit 1
-fi
-grep -Fq 'inline the helper before building the patch' "$TEMP/helper.stderr"
+  --output "$TEMP/helper.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify "$TEMP/helper.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/helper.hfpatch" >"$TEMP/helper.hfir.txt"
+grep -Fq 'function.call' "$TEMP/helper.hfir.txt"
+grep -Fq 'helper.1' "$TEMP/helper.hfir.txt"
+
+"$BUILDER" \
+  --manifest "$MANIFEST" \
+  --target integerTarget \
+  --source "$FIXTURES/patch_semantic_subset.swift" \
+  --output "$TEMP/semantic-subset.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify \
+  "$TEMP/semantic-subset.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/semantic-subset.hfpatch" >"$TEMP/semantic-subset.hfir.txt"
+grep -Fq 'function.call' "$TEMP/semantic-subset.hfir.txt"
+grep -Fq 'phi' "$TEMP/semantic-subset.hfir.txt"
+grep -Fq 'switch' "$TEMP/semantic-subset.hfir.txt"
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-i64 "$TEMP/semantic-subset.hfpatch" 0 -1
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-i64 "$TEMP/semantic-subset.hfpatch" 1 13
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-i64 "$TEMP/semantic-subset.hfpatch" 2 10
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-i64 "$TEMP/semantic-subset.hfpatch" 3 19
+
+"$BUILDER" \
+  --manifest "$FLOATING_MANIFEST" \
+  --target doubleTarget \
+  --source "$FIXTURES/patch_double.swift" \
+  --output "$TEMP/double.hfpatch"
+"$BUILDER" \
+  --manifest "$FLOATING_MANIFEST" \
+  --target floatTarget \
+  --source "$FIXTURES/patch_float.swift" \
+  --output "$TEMP/float.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/double.hfpatch" >"$TEMP/double.hfir.txt"
+grep -Fq 'mul.f64' "$TEMP/double.hfir.txt"
+grep -Fq 'div.f64' "$TEMP/double.hfir.txt"
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-f64 "$TEMP/double.hfpatch" 8 12.25
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-f64 "$TEMP/double.hfpatch" 12 6.25
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-f64 "$TEMP/float.hfpatch" 8 12.25
 
 "$SWIFT" build \
   --package-path "$MACRO_PACKAGE" \

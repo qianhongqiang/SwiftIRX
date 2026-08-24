@@ -85,6 +85,7 @@ if(APPLE)
     Tests/HFIRVMTests.cpp
     ../../SDK/IRHotfixSDK/VM/HFIRRuntime.cpp
     ../../SDK/IRHotfixSDK/Bridge/IRHotfixObjCBridge.mm
+    ../../SDK/IRHotfixSDK/HostHandle/HFHostHandleTable.mm
     ../../SDK/IRHotfixSDK/HostAdapter/HFHostAdapterRegistry.cpp
   )
   target_compile_features(HFIRVMTests PRIVATE cxx_std_20)
@@ -98,6 +99,7 @@ if(APPLE)
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/VM"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/Bridge"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/HostAdapter"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/HostHandle"
       "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
   )
   target_link_libraries(HFIRVMTests PRIVATE IRHotfixFormat "-framework Foundation")

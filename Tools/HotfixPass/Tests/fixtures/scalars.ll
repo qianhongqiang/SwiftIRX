@@ -7,19 +7,19 @@
 
 ; CHECK: @__ir_hotfix_name.37465577a37332e8.a41bdf07a2f121e1 = private constant [14 x i8] c"integerTarget\00"
 ; CHECK: @__ir_hotfix_kinds.37465577a37332e8.a41bdf07a2f121e1 = private constant [1 x i32] [i32 1]
-; CHECK: @__ir_hotfix_descriptor.37465577a37332e8.a41bdf07a2f121e1 = private constant %struct.HFDescriptor { i32 2, i32 56, i64 3982964892787487464, i64 -6621453603226705439, i32 1, i32 1, i32 0, i32 0, ptr @__ir_hotfix_name.37465577a37332e8.a41bdf07a2f121e1, ptr @__ir_hotfix_kinds.37465577a37332e8.a41bdf07a2f121e1 }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_descriptor.37465577a37332e8.a41bdf07a2f121e1 = private constant %struct.HFDescriptor { i32 3, i32 56, i64 3982964892787487464, i64 -6621453603226705439, i32 1, i32 1, i32 0, i32 0, ptr @__ir_hotfix_name.37465577a37332e8.a41bdf07a2f121e1, ptr @__ir_hotfix_kinds.37465577a37332e8.a41bdf07a2f121e1 }, section "__DATA,__hotfix"
 ; CHECK: @__ir_hotfix_name.e73de7cd22608c82.9252519d49927f55 = private constant [14 x i8] c"booleanTarget\00"
 ; CHECK: @__ir_hotfix_kinds.e73de7cd22608c82.9252519d49927f55 = private constant [1 x i32] [i32 2]
-; CHECK: @__ir_hotfix_descriptor.e73de7cd22608c82.9252519d49927f55 = private constant %struct.HFDescriptor { i32 2, i32 56, i64 -1784015009137783678, i64 -7903164660095746219, i32 2, i32 1, i32 0, i32 0, ptr @__ir_hotfix_name.e73de7cd22608c82.9252519d49927f55, ptr @__ir_hotfix_kinds.e73de7cd22608c82.9252519d49927f55 }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_descriptor.e73de7cd22608c82.9252519d49927f55 = private constant %struct.HFDescriptor { i32 3, i32 56, i64 -1784015009137783678, i64 -7903164660095746219, i32 2, i32 1, i32 0, i32 0, ptr @__ir_hotfix_name.e73de7cd22608c82.9252519d49927f55, ptr @__ir_hotfix_kinds.e73de7cd22608c82.9252519d49927f55 }, section "__DATA,__hotfix"
 ; CHECK: @__ir_hotfix_name.074ae953e60d8322.bf285a56b83c0d68 = private constant [11 x i8] c"voidTarget\00"
-; CHECK: @__ir_hotfix_descriptor.074ae953e60d8322.bf285a56b83c0d68 = private constant %struct.HFDescriptor { i32 2, i32 56, i64 525488853093286690, i64 -4672385284892258968, i32 3, i32 1, i32 0, i32 0, ptr @__ir_hotfix_name.074ae953e60d8322.bf285a56b83c0d68, ptr @__ir_hotfix_kinds.074ae953e60d8322.bf285a56b83c0d68 }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_descriptor.074ae953e60d8322.bf285a56b83c0d68 = private constant %struct.HFDescriptor { i32 3, i32 56, i64 525488853093286690, i64 -4672385284892258968, i32 3, i32 1, i32 0, i32 0, ptr @__ir_hotfix_name.074ae953e60d8322.bf285a56b83c0d68, ptr @__ir_hotfix_kinds.074ae953e60d8322.bf285a56b83c0d68 }, section "__DATA,__hotfix"
 ; CHECK: @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [15 x i8] c"instanceTarget\00"
 ; CHECK: @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [1 x i32] [i32 1]
-; CHECK: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.HFDescriptor { i32 2, i32 56, i64 5668467115194567859, i64 -6621454702738333650, i32 1, i32 1, i32 1, i32 0, ptr @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e, ptr @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e }, section "__DATA,__hotfix"
+; CHECK: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.HFDescriptor { i32 3, i32 56, i64 5668467115194567859, i64 -6621454702738333650, i32 1, i32 1, i32 1, i32 0, ptr @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e, ptr @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e }, section "__DATA,__hotfix"
 ; CHECK: @__ir_hotfix_name.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant [21 x i8] c"eightScalarArguments\00"
 ; CHECK: @__ir_hotfix_kinds.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant [8 x i32] [i32 1, i32 2, i32 1, i32 2, i32 1, i32 2, i32 1, i32 2]
-; CHECK: @__ir_hotfix_descriptor.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant %struct.HFDescriptor { i32 2, i32 56, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}}, i32 1, i32 8, i32 1, i32 0, ptr @__ir_hotfix_name.{{[0-9a-f]+}}.{{[0-9a-f]+}}, ptr @__ir_hotfix_kinds.{{[0-9a-f]+}}.{{[0-9a-f]+}} }, section "__DATA,__hotfix"
-; CHECK: @llvm.used = appending global [10 x ptr]
+; CHECK: @__ir_hotfix_descriptor.{{[0-9a-f]+}}.{{[0-9a-f]+}} = private constant %struct.HFDescriptor { i32 3, i32 56, i64 {{-?[0-9]+}}, i64 {{-?[0-9]+}}, i32 1, i32 8, i32 1, i32 0, ptr @__ir_hotfix_name.{{[0-9a-f]+}}.{{[0-9a-f]+}}, ptr @__ir_hotfix_kinds.{{[0-9a-f]+}}.{{[0-9a-f]+}} }, section "__DATA,__hotfix"
+; CHECK: @llvm.used = appending global [11 x ptr]
 ; CHECK-SAME: ptr @__ir_hotfix_descriptor.37465577a37332e8.a41bdf07a2f121e1,
 ; CHECK-SAME: ptr @__ir_hotfix_descriptor.e73de7cd22608c82.9252519d49927f55,
 ; CHECK-SAME: ptr @__ir_hotfix_descriptor.074ae953e60d8322.bf285a56b83c0d68,
@@ -32,7 +32,7 @@
 ; CHECK: store i32 1, ptr %{{[^,]+}}, align 4
 ; CHECK: store i64 %value, ptr %{{[^,]+}}, align 8
 ; CHECK: %[[INT_FRAME:[^ ]+]] = alloca %struct.HFPatchFrame, align 8
-; CHECK: store i32 2, ptr %{{[^,]+}}, align 4
+; CHECK: store i32 3, ptr %{{[^,]+}}, align 4
 ; CHECK: store i32 96, ptr %{{[^,]+}}, align 4
 ; CHECK: store i64 3982964892787487464, ptr %{{[^,]+}}, align 8
 ; CHECK: store i64 -6621453603226705439, ptr %{{[^,]+}}, align 8
@@ -89,11 +89,11 @@
 ; CHECK: store i64 %value, ptr %{{[^,]+}}, align 8
 ; CHECK: %[[INSTANCE_FRAME:[^ ]+]] = alloca %struct.HFPatchFrame, align 8
 ; CHECK: store i32 1, ptr %{{[^,]+}}, align 4
-; CHECK: %[[RECEIVER_TOKEN:[^ ]+]] = ptrtoint ptr %self to i64
-; CHECK: store i64 %[[RECEIVER_TOKEN]], ptr %{{[^,]+}}, align 8
-; CHECK: store i16 1, ptr %{{[^,]+}}, align 2
-; CHECK: store i16 -32767, ptr %{{[^,]+}}, align 2
+; CHECK: %[[RECEIVER_HANDLE:[^ ]+]] = alloca %struct.HFHandle, align 8
+; CHECK: call i32 @hf_host_handle_scope_begin(ptr %self, i16 1, ptr %[[RECEIVER_HANDLE]])
+; CHECK: load %struct.HFHandle, ptr %[[RECEIVER_HANDLE]], align 8
 ; CHECK: %[[INSTANCE_STATUS:[^ ]+]] = call i32 @hf_vm_invoke(ptr %[[INSTANCE_FRAME]])
+; CHECK: call i32 @hf_host_handle_scope_end_ref(ptr %[[RECEIVER_HANDLE]])
 ; CHECK: %[[INSTANCE_APPLIED:[^ ]+]] = icmp eq i32 %[[INSTANCE_STATUS]], 0
 ; CHECK: br i1 %[[INSTANCE_APPLIED]], label %[[INSTANCE_PATCHED:[^,]+]], label %[[INSTANCE_FALLBACK:[^,]+]]
 ; CHECK: [[INSTANCE_PATCHED]]:
@@ -146,11 +146,14 @@
 ; CHECK: call i32 @hf_vm_invoke
 ; CHECK: call swiftcc range(i64 0, 10) i64 @rangeTarget.hotfix_original(i64 %value)
 
-; CHECK-LABEL: define swiftcc double @unsupported(double %value) {
-; CHECK-NEXT: entry:
-; CHECK-NEXT: %sum = fadd double %value, 1.000000e+00
-; CHECK-NEXT: ret double %sum
-; CHECK-NEXT: }
+; CHECK-LABEL: define swiftcc double @unsupported(double %value)
+; CHECK: store i32 6, ptr %{{[^,]+}}, align 4
+; CHECK: %[[DOUBLE_BITS:[^ ]+]] = bitcast double %value to i64
+; CHECK: store i64 %[[DOUBLE_BITS]], ptr %{{[^,]+}}, align 8
+; CHECK: call i32 @hf_vm_invoke
+; CHECK: %[[DOUBLE_RESULT:[^ ]+]] = bitcast i64 %{{[^ ]+}} to double
+; CHECK: ret double %[[DOUBLE_RESULT]]
+; CHECK: call swiftcc double @unsupported.hotfix_original(double %value)
 
 ; CHECK-LABEL: define swiftcc i64 @unsupportedPointer(ptr %value) {
 ; CHECK-NEXT: entry:
@@ -264,7 +267,7 @@
 ; RETAIN: @__ir_hotfix_name.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [15 x i8] c"instanceTarget\00"
 ; RETAIN: @__ir_hotfix_kinds.4eaa70cef627ccb3.a41bde07a2f1202e = private constant [1 x i32] [i32 1]
 ; RETAIN: @__ir_hotfix_descriptor.4eaa70cef627ccb3.a41bde07a2f1202e = private constant %struct.HFDescriptor {{.*}}section "__DATA,__hotfix"
-; RETAIN: @llvm.compiler.used = appending global [20 x ptr]
+; RETAIN: @llvm.compiler.used = appending global [22 x ptr]
 ; RETAIN-SAME: ptr @booleanTarget, ptr @booleanTarget.hotfix_original,
 ; RETAIN-SAME: ptr @eightScalarArguments, ptr @eightScalarArguments.hotfix_original,
 ; RETAIN-SAME: ptr @instanceTarget, ptr @instanceTarget.hotfix_original,
@@ -274,19 +277,22 @@
 ; RETAIN-SAME: ptr @recursiveTarget, ptr @recursiveTarget.hotfix_original,
 ; RETAIN-SAME: ptr @returnedTarget, ptr @returnedTarget.hotfix_original,
 ; RETAIN-SAME: ptr @semanticTarget, ptr @semanticTarget.hotfix_original,
+; RETAIN-SAME: ptr @unsupported, ptr @unsupported.hotfix_original,
 ; RETAIN-SAME: ptr @voidTarget, ptr @voidTarget.hotfix_original]
 ; RETAIN: define swiftcc i64 @integerTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS:[0-9]+]] {
 ; RETAIN: define swiftcc i1 @booleanTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc void @voidTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc i64 @instanceTarget(i64 %value, ptr swiftself %self) #[[RETAIN_TRAMPOLINE_ATTRS]] {
-; RETAIN: ptrtoint ptr %self to i64
+; RETAIN: call i32 @hf_host_handle_scope_begin(ptr %self, i16 1,
 ; RETAIN: call i32 @hf_vm_invoke
+; RETAIN: call i32 @hf_host_handle_scope_end_ref
 ; RETAIN: call swiftcc i64 @instanceTarget.hotfix_original(i64 %value, ptr nocapture readnone swiftself {{(%self|poison)}})
 ; RETAIN: define swiftcc i64 @recursiveTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc i64 @semanticTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define internal swiftcc i64 @internalTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc i64 @returnedTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define swiftcc i64 @rangeTarget({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
+; RETAIN: define swiftcc double @unsupported({{.*}}) #[[RETAIN_TRAMPOLINE_ATTRS]] {
 ; RETAIN: define private swiftcc i64 @integerTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS:[0-9]+]] {
 ; RETAIN: define private swiftcc i1 @booleanTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc void @voidTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
@@ -296,6 +302,7 @@
 ; RETAIN: define private swiftcc i64 @internalTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc i64 @returnedTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN: define private swiftcc range(i64 0, 10) i64 @rangeTarget.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
+; RETAIN: define private swiftcc double @unsupported.hotfix_original({{.*}}) #[[RETAIN_CLONE_ATTRS]] {
 ; RETAIN-NOT: .hotfix_original.
 ; RETAIN: attributes #[[RETAIN_TRAMPOLINE_ATTRS]] = { noinline }
 ; RETAIN: attributes #[[RETAIN_CLONE_ATTRS]] = { {{.*}}noinline{{.*}} }

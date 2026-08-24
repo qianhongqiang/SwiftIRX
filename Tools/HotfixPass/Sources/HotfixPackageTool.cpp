@@ -72,7 +72,7 @@ hfir::Package setupUIExample() {
 
   hfir::Package package;
   package.abiVersion = HF_ABI_VERSION;
-  package.patchID = "example.setup-ui.hfir-v1";
+  package.patchID = "example.setup-ui.hfir-v2";
   package.target = {0x1232093bb65a3a2bULL, 0x3fc60f0529f431f8ULL, 0};
   package.constants = {
       Constant{ConstantKind::Rect, 0, doubles({0, 0, 100, 100})},

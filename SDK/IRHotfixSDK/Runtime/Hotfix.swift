@@ -10,12 +10,16 @@ nonisolated enum HotfixValueKind: UInt8, Codable, Sendable {
     case int = 1
     case bool = 2
     case void = 3
+    case float = 4
+    case double = 5
 
     var abiName: String {
         switch self {
         case .int: "i64"
         case .bool: "i1"
         case .void: "void"
+        case .float: "f32"
+        case .double: "f64"
         }
     }
 }
@@ -32,15 +36,15 @@ nonisolated enum HotfixABI {
     static let hasReceiverFlag = UInt32(HFPatchFrameFlagHasReceiver)
     static let objectHandleKind = UInt16(HFHandleKindObject)
     static let invalidHandleKind = UInt16(HFHandleKindInvalid)
-    static let borrowedHandleFlags = UInt16(
-        HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress
-    )
+    static let borrowedHandleFlags = UInt16(HFHandleFlagBorrowed)
 }
 
 nonisolated enum HotfixTargetValueKind: String, Codable, Sendable {
     case int = "i64"
     case bool = "i1"
     case void
+    case float = "f32"
+    case double = "f64"
 }
 
 nonisolated struct HotfixTargetDescriptor: Codable, Equatable, Sendable {

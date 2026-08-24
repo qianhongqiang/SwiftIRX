@@ -1,6 +1,7 @@
 #include "HFHostAdapter.h"
 
 #include "../Bridge/IRHotfixObjCBridge.h"
+#include "../HostHandle/HFHostHandleTable.h"
 
 #include <atomic>
 #include <cstdint>
@@ -96,26 +97,24 @@ bool validHandle(HFHandle handle, bool required) {
     return handle.token == 0 && handle.generation == 0 &&
            handle.kind == HFHandleKindInvalid &&
            handle.flags == HFHandleFlagNone;
-  return handle.token != 0 && handle.generation == 0 &&
-         (handle.kind == HFHandleKindObject ||
-          handle.kind == HFHandleKindClass ||
-          handle.kind == HFHandleKindNativeSymbol) &&
-         (handle.flags == (HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress) ||
-          handle.flags == HFHandleFlagRetained);
+  return hf_host_handle_validate(handle) == HFStatusApplied;
 }
 
 bool validValue(const HFValue &value, HFValueKind expected, bool result) {
   if (value.kind != expected)
     return false;
   if (expected == HFValueKindHostHandle) {
-    if (value.bits == 0)
-      return value.flags == HFValueFlagNone && value.bytes == nullptr &&
-             value.byteCount == 0;
+    HFHandle handle = HFInvalidHandle();
+    if (!HFValueGetHostHandle(&value, &handle))
+      return false;
+    if (handle.token == 0)
+      return true;
     const bool validOwnership = result
         ? value.flags == HFValueFlagBorrowedHostHandle ||
               value.flags == HFValueFlagRetainedHostHandle
         : value.flags == HFValueFlagBorrowedHostHandle;
-    return value.bytes == nullptr && value.byteCount == 0 && validOwnership;
+    return validOwnership &&
+           hf_host_handle_validate(handle) == HFStatusApplied;
   }
   if (expected == HFValueKindBytes)
     return value.flags == HFValueFlagNone &&
@@ -126,11 +125,12 @@ bool validValue(const HFValue &value, HFValueKind expected, bool result) {
   return expected != HFValueKindBool || value.bits <= 1;
 }
 
-void discardResult(HFValue &value, bool objcCompatibleHandles) {
-  if (objcCompatibleHandles && value.kind == HFValueKindHostHandle &&
+void discardResult(HFValue &value) {
+  if (value.kind == HFValueKindHostHandle &&
       value.bits != 0 && value.flags == HFValueFlagRetainedHostHandle) {
-    IRHFObjCReleaseRetainedObject(reinterpret_cast<void *>(
-        static_cast<std::uintptr_t>(value.bits)));
+    HFHandle handle = HFInvalidHandle();
+    if (HFValueGetHostHandle(&value, &handle))
+      hf_host_handle_release(handle);
   }
   value = HFMakeValue(HFValueKindInvalid, 0);
 }
@@ -251,12 +251,32 @@ HFStatus invokeObjectiveC(const HFHostCallDescriptor &descriptor,
     void *objectClass = IRHFObjCLookUpClass(descriptor.owner);
     if (objectClass == nullptr)
       return HFStatusExecutionFailed;
-    result = HFMakeValue(
-        HFValueKindHostHandle,
-        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(objectClass)));
-    result.flags = HFValueFlagBorrowedHostHandle;
+    HFHandle classHandle = HFInvalidHandle();
+    const HFStatus registerStatus = hf_host_handle_register(
+        objectClass, HFHandleKindClass, HFHostHandleOwnershipStrong,
+        &classHandle);
+    if (registerStatus != HFStatusApplied)
+      return registerStatus;
+    result = HFValueFromHostHandle(classHandle,
+                                   HFValueFlagRetainedHostHandle);
     return HFStatusApplied;
   }
+
+  struct LeaseDeleter {
+    void operator()(HFHostHandleLease *lease) const {
+      hf_host_handle_lease_release(lease);
+    }
+  };
+  using Lease = std::unique_ptr<HFHostHandleLease, LeaseDeleter>;
+  std::vector<Lease> handleLeases;
+
+  HFHostHandleLease *receiverLease = nullptr;
+  void *object = nullptr;
+  const HFStatus resolveStatus =
+      hf_host_handle_resolve(receiver, &receiverLease, &object);
+  if (resolveStatus != HFStatusApplied)
+    return resolveStatus;
+  handleLeases.emplace_back(receiverLease);
 
   std::vector<IRHFValue> bridged(descriptor.argumentCount);
   for (std::uint32_t index = 0; index < descriptor.argumentCount; ++index) {
@@ -283,6 +303,22 @@ HFStatus invokeObjectiveC(const HFHostCallDescriptor &descriptor,
       break;
     case HFValueKindHostHandle:
       destination.kind = IRHFValueKindObject;
+      if (source.bits != 0) {
+        HFHandle handle = HFInvalidHandle();
+        if (!HFValueGetHostHandle(&source, &handle))
+          return HFStatusInvalidArguments;
+        HFHostHandleLease *argumentLease = nullptr;
+        void *argumentObject = nullptr;
+        const HFStatus argumentStatus = hf_host_handle_resolve(
+            handle, &argumentLease, &argumentObject);
+        if (argumentStatus != HFStatusApplied)
+          return argumentStatus;
+        handleLeases.emplace_back(argumentLease);
+        destination.bits = static_cast<std::uint64_t>(
+            reinterpret_cast<std::uintptr_t>(argumentObject));
+        destination.bytes = nullptr;
+        destination.byteCount = 0;
+      }
       break;
     case HFValueKindBytes:
       destination.kind = IRHFValueKindBytes;
@@ -292,8 +328,6 @@ HFStatus invokeObjectiveC(const HFHostCallDescriptor &descriptor,
     }
   }
 
-  void *object = reinterpret_cast<void *>(
-      static_cast<std::uintptr_t>(receiver.token));
   const IRHFObjCInvocationResult invocation =
       descriptor.callKind == HFHostCallKindConstructor
           ? IRHFObjCConstruct(object, descriptor.name, bridged.data(),
@@ -317,13 +351,38 @@ HFStatus invokeObjectiveC(const HFHostCallDescriptor &descriptor,
   case IRHFValueKindFloat64: result.kind = HFValueKindFloat64; break;
   case IRHFValueKindObject:
     result.kind = HFValueKindHostHandle;
-    result.flags = result.bits == 0 ? HFValueFlagNone
-                                    : HFValueFlagRetainedHostHandle;
+    if (result.bits != 0) {
+      void *returnedObject = reinterpret_cast<void *>(
+          static_cast<std::uintptr_t>(result.bits));
+      HFHandle returnedHandle = HFInvalidHandle();
+      const HFStatus registerStatus = hf_host_handle_register(
+          returnedObject, HFHandleKindObject, HFHostHandleOwnershipStrong,
+          &returnedHandle);
+      IRHFObjCReleaseRetainedObject(returnedObject);
+      if (registerStatus != HFStatusApplied)
+        return registerStatus;
+      result = HFValueFromHostHandle(returnedHandle,
+                                     HFValueFlagRetainedHostHandle);
+    } else {
+      result = HFValueFromHostHandle(HFInvalidHandle(), HFValueFlagNone);
+    }
     break;
   case IRHFValueKindPointer:
     result.kind = HFValueKindHostHandle;
-    result.flags = result.bits == 0 ? HFValueFlagNone
-                                    : HFValueFlagBorrowedHostHandle;
+    if (result.bits != 0) {
+      void *returnedPointer = reinterpret_cast<void *>(
+          static_cast<std::uintptr_t>(result.bits));
+      HFHandle returnedHandle = HFInvalidHandle();
+      const HFStatus registerStatus = hf_host_handle_register(
+          returnedPointer, HFHandleKindNativeSymbol,
+          HFHostHandleOwnershipStrong, &returnedHandle);
+      if (registerStatus != HFStatusApplied)
+        return registerStatus;
+      result = HFValueFromHostHandle(returnedHandle,
+                                     HFValueFlagRetainedHostHandle);
+    } else {
+      result = HFValueFromHostHandle(HFInvalidHandle(), HFValueFlagNone);
+    }
     break;
   case IRHFValueKindBytes: result.kind = HFValueKindBytes; break;
   case IRHFValueKindVoid: result.kind = HFValueKindVoid; break;
@@ -385,20 +444,12 @@ HFStatus invokeRegisteredAdapter(
     status = HFStatusExecutionFailed;
   }
   frame.status = status;
-  const bool objcCompatibleHandles =
-      (descriptor.flags & HFHostCallFlagObjCCompatibleHandles) != 0;
   if (status != HFStatusApplied) {
-    discardResult(frame.result, objcCompatibleHandles);
+    discardResult(frame.result);
     return status;
   }
   if (!validValue(frame.result, descriptor.returnKind, true)) {
-    discardResult(frame.result, objcCompatibleHandles);
-    return HFStatusInvalidResult;
-  }
-  if (frame.result.kind == HFValueKindHostHandle &&
-      frame.result.flags == HFValueFlagRetainedHostHandle &&
-      !objcCompatibleHandles) {
-    frame.result = HFMakeValue(HFValueKindInvalid, 0);
+    discardResult(frame.result);
     return HFStatusInvalidResult;
   }
   *result = frame.result;
@@ -521,11 +572,11 @@ HFStatus hf_host_adapter_invoke(
         invokeObjectiveC(*descriptor, receiver, arguments, *result);
     if (status == HFStatusApplied &&
         !validValue(*result, descriptor->returnKind, true)) {
-      discardResult(*result, true);
+      discardResult(*result);
       return HFStatusInvalidResult;
     }
     if (status != HFStatusApplied)
-      discardResult(*result, true);
+      discardResult(*result);
     return status;
   }
 

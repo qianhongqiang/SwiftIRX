@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "abiVersion": 3,
+  "targets": [
+    {
+      "symbol": "doubleTarget",
+      "targetID": "0xf0639682b7748db1",
+      "signatureID": "0x39b44fe3e8594415",
+      "returnKind": "f64",
+      "argumentKinds": [
+        "f64"
+      ],
+      "hasReceiver": false
+    },
+    {
+      "symbol": "floatTarget",
+      "targetID": "0x9c403774296fec08",
+      "signatureID": "0x67dfb40221f717c1",
+      "returnKind": "f32",
+      "argumentKinds": [
+        "f32"
+      ],
+      "hasReceiver": false
+    }
+  ]
+}

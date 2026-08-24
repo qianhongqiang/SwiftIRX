@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "abiVersion": 2,
+  "abiVersion": 3,
   "targets": [
     {
       "symbol": "integerTarget",

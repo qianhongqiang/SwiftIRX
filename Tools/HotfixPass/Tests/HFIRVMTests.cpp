@@ -1,8 +1,11 @@
 #include "HFIRRuntime.h"
 #include "HFHostAdapter.hpp"
 #include "HFPatchContainer.h"
+#include "IRHotfixObjCBridge.h"
 
 #include <cstdlib>
+#include <cmath>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -55,6 +58,51 @@ hfir::Package makeArithmeticPackage() {
            {{OperandKind::Register, ValueType::I64, 2}}},
       },
   }};
+  package.functions = {std::move(function)};
+  return package;
+}
+
+hfir::Package makeSwitchPhiPackage() {
+  using namespace hfir;
+  Package package;
+  package.abiVersion = HF_ABI_VERSION;
+  package.patchID = "vm.switch-phi";
+  package.target = {0x1010, 0x2010, 0};
+  package.constants = {
+      {ConstantKind::I64, 0, {}}, {ConstantKind::I64, 1, {}},
+      {ConstantKind::I64, 10, {}}, {ConstantKind::I64, 20, {}},
+      {ConstantKind::I64, 30, {}},
+  };
+  Function function;
+  function.name = "switchPhi";
+  function.returnType = ValueType::I64;
+  function.parameterTypes = {ValueType::I64};
+  function.registerTypes = {ValueType::I64, ValueType::I64};
+  function.entryBlock = 0;
+  function.blocks = {
+      {0, {{Opcode::Switch, kNoRegister, ValueType::Void,
+            {{OperandKind::Register, ValueType::I64, 0},
+             {OperandKind::Block, ValueType::Void, 3},
+             {OperandKind::Constant, ValueType::I64, 0},
+             {OperandKind::Block, ValueType::Void, 1},
+             {OperandKind::Constant, ValueType::I64, 1},
+             {OperandKind::Block, ValueType::Void, 2}}}}},
+      {1, {{Opcode::Branch, kNoRegister, ValueType::Void,
+            {{OperandKind::Block, ValueType::Void, 4}}}}},
+      {2, {{Opcode::Branch, kNoRegister, ValueType::Void,
+            {{OperandKind::Block, ValueType::Void, 4}}}}},
+      {3, {{Opcode::Branch, kNoRegister, ValueType::Void,
+            {{OperandKind::Block, ValueType::Void, 4}}}}},
+      {4, {{Opcode::Phi, 1, ValueType::I64,
+            {{OperandKind::Constant, ValueType::I64, 2},
+             {OperandKind::Block, ValueType::Void, 1},
+             {OperandKind::Constant, ValueType::I64, 3},
+             {OperandKind::Block, ValueType::Void, 2},
+             {OperandKind::Constant, ValueType::I64, 4},
+             {OperandKind::Block, ValueType::Void, 3}}},
+           {Opcode::Return, kNoRegister, ValueType::Void,
+            {{OperandKind::Register, ValueType::I64, 1}}}}},
+  };
   package.functions = {std::move(function)};
   return package;
 }
@@ -622,11 +670,10 @@ void testNativeCXXMethodGateway() {
       symbol, HFHostLanguageCXX, HFHostCallKindInstanceMethod,
       HFValueKindSignedInteger, argumentKinds, 1, true);
   NativeMultiplier multiplier(3);
-  HFHandle receiver = {};
-  receiver.token = static_cast<std::uint64_t>(
-      reinterpret_cast<std::uintptr_t>(&multiplier));
-  receiver.kind = HFHandleKindObject;
-  receiver.flags = HFHandleFlagBorrowed | HFHandleFlagBorrowedAddress;
+  HFHandle receiver = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(&multiplier, HFHandleKindNativeSymbol,
+                                     &receiver) == HFStatusApplied,
+          "native C++ receiver handle registration failed");
   HFValue argument = HFMakeValue(HFValueKindSignedInteger, 14);
   HFValue result = HFMakeValue(HFValueKindInvalid, 0);
   require(hf_host_adapter_invoke(&call, receiver, &argument, 1, &result) ==
@@ -634,11 +681,156 @@ void testNativeCXXMethodGateway() {
           "native C++ method gateway invocation failed");
   require(result.kind == HFValueKindSignedInteger && result.bits == 42,
           "native C++ method gateway returned the wrong value");
+  require(hf_host_handle_scope_end(receiver) == HFStatusApplied,
+          "native C++ receiver handle release failed");
+}
+
+void testSwitchAndConstantPhi() {
+  const hfir::Package package = makeSwitchPhiPackage();
+  const HFIRPatchHandle handle = installAndActivate(package);
+  for (const auto &[input, expected] :
+       std::vector<std::pair<std::uint64_t, std::uint64_t>>{
+           {0, 10}, {1, 20}, {9, 30}}) {
+    HFValue argument = HFMakeValue(HFValueKindSignedInteger, input);
+    HFPatchFrame frame = HFMakePatchFrame();
+    frame.targetID = package.target.targetID;
+    frame.signatureID = package.target.signatureID;
+    frame.arguments = &argument;
+    frame.argumentCount = 1;
+    require(hf_hfir_vm_invoke(&frame) == HFStatusApplied,
+            "switch/phi package invocation failed");
+    require(frame.result.kind == HFValueKindSignedInteger &&
+                frame.result.bits == expected,
+            "switch/phi package returned the wrong branch");
+  }
+  require(hf_hfir_vm_uninstall(handle) == HFStatusApplied,
+          "switch/phi package uninstall failed");
+}
+
+void testHostHandleGenerationOwnershipAndLease() {
+  const std::uint64_t baseline = hf_host_handle_live_count();
+  int native = 42;
+  HFHandle first = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(&native, HFHandleKindNativeSymbol,
+                                     &first) == HFStatusApplied,
+          "borrowed host handle registration failed");
+  HFHostHandleLease *lease = nullptr;
+  void *resolved = nullptr;
+  require(hf_host_handle_resolve(first, &lease, &resolved) == HFStatusApplied &&
+              resolved == &native,
+          "borrowed host handle resolution failed");
+  require(hf_host_handle_scope_end(first) == HFStatusApplied,
+          "borrowed host handle release failed");
+  require(hf_host_handle_validate(first) == HFStatusStaleHandle,
+          "released host handle was not stale");
+  require(resolved == &native,
+          "active invocation lease lost its resolved value");
+  hf_host_handle_lease_release(lease);
+
+  HFHandle second = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(&native, HFHandleKindNativeSymbol,
+                                     &second) == HFStatusApplied,
+          "reused host handle registration failed");
+  require(second.token == first.token && second.generation != first.generation,
+          "reused handle slot did not advance generation");
+  require(hf_host_handle_scope_end(second) == HFStatusApplied,
+          "reused host handle release failed");
+
+  void *string = IRHFObjCCreateStringUTF8("handle", 6);
+  require(string != nullptr, "test string allocation failed");
+  HFHandle strong = HFInvalidHandle();
+  require(hf_host_handle_register(string, HFHandleKindObject,
+                                  HFHostHandleOwnershipStrong,
+                                  &strong) == HFStatusApplied,
+          "strong object handle registration failed");
+  IRHFObjCReleaseRetainedObject(string);
+  require(hf_host_handle_validate(strong) == HFStatusApplied,
+          "strong object handle did not retain its object");
+  require(hf_host_handle_release(strong) == HFStatusApplied,
+          "strong object handle release failed");
+
+  const std::string weakBytes(128, 'w');
+  void *weakString = IRHFObjCCreateStringUTF8(weakBytes.data(), weakBytes.size());
+  require(weakString != nullptr, "weak test string allocation failed");
+  HFHandle weak = HFInvalidHandle();
+  require(hf_host_handle_register(weakString, HFHandleKindObject,
+                                  HFHostHandleOwnershipWeak,
+                                  &weak) == HFStatusApplied,
+          "weak object handle registration failed");
+  IRHFObjCReleaseRetainedObject(weakString);
+  require(hf_host_handle_validate(weak) == HFStatusStaleHandle,
+          "deallocated weak object handle was not stale");
+  require(hf_host_handle_release(weak) == HFStatusApplied,
+          "stale weak object handle entry could not be released");
+  require(hf_host_handle_live_count() == baseline,
+          "host handle table leaked a live entry");
 }
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  if (argc == 5 && std::string(argv[1]) == "--invoke-i64") {
+    std::ifstream input(argv[2], std::ios::binary);
+    require(input.good(), "cannot open patch for invocation");
+    std::vector<std::uint8_t> bytes(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    HFIRPatchHandle handle = {};
+    require(hf_hfir_vm_install(bytes.data(), bytes.size(), &handle) ==
+                HFStatusApplied,
+            "patch runner install failed");
+    require(hf_hfir_vm_activate(handle) == HFStatusApplied,
+            "patch runner activation failed");
+    HFValue argument = HFMakeValue(
+        HFValueKindSignedInteger,
+        static_cast<std::uint64_t>(std::stoll(argv[3])));
+    HFPatchFrame frame = HFMakePatchFrame();
+    frame.targetID = handle.targetID;
+    frame.signatureID = handle.signatureID;
+    frame.arguments = &argument;
+    frame.argumentCount = 1;
+    require(hf_hfir_vm_invoke(&frame) == HFStatusApplied,
+            "patch runner invocation failed");
+    require(frame.result.kind == HFValueKindSignedInteger &&
+                static_cast<std::int64_t>(frame.result.bits) ==
+                    std::stoll(argv[4]),
+            "patch runner returned an unexpected value");
+    require(hf_hfir_vm_uninstall(handle) == HFStatusApplied,
+            "patch runner uninstall failed");
+    std::cout << "HFIR patch invocation passed\n";
+    return 0;
+  }
+  if (argc == 5 && std::string(argv[1]) == "--invoke-f64") {
+    std::ifstream input(argv[2], std::ios::binary);
+    require(input.good(), "cannot open floating patch for invocation");
+    std::vector<std::uint8_t> bytes(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    HFIRPatchHandle handle = {};
+    require(hf_hfir_vm_install(bytes.data(), bytes.size(), &handle) ==
+                HFStatusApplied,
+            "floating patch runner install failed");
+    require(hf_hfir_vm_activate(handle) == HFStatusApplied,
+            "floating patch runner activation failed");
+    const double argumentNumber = std::stod(argv[3]);
+    HFValue argument = HFMakeValue(
+        HFValueKindFloat64, std::bit_cast<std::uint64_t>(argumentNumber));
+    HFPatchFrame frame = HFMakePatchFrame();
+    frame.targetID = handle.targetID;
+    frame.signatureID = handle.signatureID;
+    frame.arguments = &argument;
+    frame.argumentCount = 1;
+    require(hf_hfir_vm_invoke(&frame) == HFStatusApplied,
+            "floating patch runner invocation failed");
+    const double result = std::bit_cast<double>(frame.result.bits);
+    require(frame.result.kind == HFValueKindFloat64 &&
+                std::abs(result - std::stod(argv[4])) < 0.0001,
+            "floating patch runner returned an unexpected value");
+    require(hf_hfir_vm_uninstall(handle) == HFStatusApplied,
+            "floating patch runner uninstall failed");
+    std::cout << "HFIR floating patch invocation passed\n";
+    return 0;
+  }
   testArithmeticAndFrameValidation();
   testDescriptorDrivenObjCInvocation();
   testObjCPreflightPreservesOffMainFallback();
@@ -649,6 +841,8 @@ int main() {
   testNativeRegistrationIdentityAndNullCallables();
   testNativeLeasePinsExactRegistration();
   testNativeCXXMethodGateway();
+  testSwitchAndConstantPhi();
+  testHostHandleGenerationOwnershipAndLease();
   std::cout << "HFIRVMTests passed\n";
   return 0;
 }

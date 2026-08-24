@@ -6,8 +6,8 @@ import UIKit
 #endif
 
 struct IRTests {
-    @Test func publicFrameABIHasStableVersionTwoLayouts() {
-        #expect(HotfixABI.version == 2)
+    @Test func publicFrameABIHasStableVersionThreeLayouts() {
+        #expect(HotfixABI.version == 3)
         #expect(MemoryLayout<HFHandle>.size == 16)
         #expect(MemoryLayout<HFValue>.size == 32)
         #expect(MemoryLayout<HFPatchFrame>.size == 96)
@@ -96,10 +96,12 @@ struct IRTests {
         frame.targetID = 0x1232093bb65a3a2b
         frame.signatureID = 0x988cc6a5a1ee0058
         frame.flags = HotfixABI.hasReceiverFlag
-        frame.receiver.token = UInt64(UInt(bitPattern:
-            Unmanaged.passUnretained(viewController).toOpaque()))
-        frame.receiver.kind = HotfixABI.objectHandleKind
-        frame.receiver.flags = HotfixABI.borrowedHandleFlags
+        #expect(hf_host_handle_scope_begin(
+            Unmanaged.passUnretained(viewController).toOpaque(),
+            HFHandleKind(HFHandleKindObject),
+            &frame.receiver
+        ) == HFStatus(HFStatusApplied))
+        defer { _ = hf_host_handle_scope_end(frame.receiver) }
 
         #expect(hf_vm_invoke(&frame) == HFStatus(HFStatusApplied))
         #expect(frame.result.kind == HotfixABI.voidKind)

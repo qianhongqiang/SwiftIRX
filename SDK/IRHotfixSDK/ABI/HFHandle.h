@@ -18,9 +18,7 @@ enum {
     HFHandleFlagNone = 0,
     HFHandleFlagBorrowed = 1u << 0,
     HFHandleFlagRetained = 1u << 1,
-    /// Phase-1 compatibility: `token` is a synchronous borrowed host address.
-    /// The VM must still treat it as opaque and resolve it through the gateway.
-    HFHandleFlagBorrowedAddress = 1u << 15,
+    HFHandleFlagWeak = 1u << 2,
 };
 
 typedef struct HFHandle {

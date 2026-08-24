@@ -58,6 +58,10 @@ std::optional<StringRef> abiName(uint32_t kind, bool allowVoid) {
     return "i64";
   case HFValueKindBool:
     return "i1";
+  case HFValueKindFloat32:
+    return "f32";
+  case HFValueKindFloat64:
+    return "f64";
   case HFValueKindVoid:
     if (allowVoid)
       return "void";
@@ -278,6 +282,10 @@ std::optional<uint32_t> parseKind(StringRef text, bool allowVoid) {
     return HFValueKindSignedInteger;
   if (text == "i1")
     return HFValueKindBool;
+  if (text == "f32")
+    return HFValueKindFloat32;
+  if (text == "f64")
+    return HFValueKindFloat64;
   if (allowVoid && text == "void")
     return HFValueKindVoid;
   return std::nullopt;

@@ -49,7 +49,7 @@ IRHotfixSDK/
   and Codable Target Manifest model.
 - `Runtime/HotfixPatchAnnotation.swift` declares the build-only
   `@HotfixPatch` marker used to select changed functions on a patch branch.
-- `Format/` defines typed HFIR v1, the deterministic `.hfpatch` v1 container,
+- `Format/` defines typed HFIR v2, the deterministic `.hfpatch` v1 container,
   semantic validation, binary encoding/decoding, and human-readable dumping.
   It is C++20 with no LLVM dependency so the same code runs in host tools and
   the iOS VM.
@@ -80,8 +80,10 @@ IRHotfixSDK/
 - `Support/IRHotfix-Bridging-Header.h` is the app target's Swift bridging-header
   integration point.
 
-`HF_ABI_VERSION` is currently `2`. Version 2 adds committed-execution status
-semantics; an older trampoline is rejected before patch execution. Every caller
+`HF_ABI_VERSION` is currently `3`. Version 3 replaces address-bearing receiver
+values with generation-checked Host Handle Table entries. It retains the
+committed-execution status semantics introduced by version 2; an older
+trampoline is rejected before patch execution. Every caller
 writes both `abiVersion` and `structSize`; the runtime validates them before
 reading arguments. A trampoline
 uses the patch result only for `HFStatusApplied`. Failures before host effects
@@ -90,11 +92,12 @@ effectful host call begins, `HFStatusExecutionCommitted` suppresses fallback;
 void functions return and value-returning functions trap rather than run the
 original implementation with duplicated effects.
 
-For the first version, an object receiver is represented by a structured,
-synchronous borrowed `HFHandle`. Its token temporarily carries the host address
-behind the `HFHandleFlagBorrowedAddress` flag. Consumers must still treat the
-token as opaque: a later handle table can replace that token meaning without
-changing `HFPatchFrame` layout.
+Object receivers and host-object values are represented by opaque `HFHandle`
+values backed by the Host Handle Table. A handle contains a slot ID and
+generation; stale generations are rejected. Entries support strong, weak, and
+borrowed ownership, and invocation leases pin a resolved object for the duration
+of a host call. ObjC and Swift objects use the same registry and can safely span
+multiple calls when the owning handle is retained.
 
 Compiler output calls the status-returning `hf_vm_invoke` directly. The app has
 no Boolean compatibility gateway and no runtime LLVM-text interpreter.

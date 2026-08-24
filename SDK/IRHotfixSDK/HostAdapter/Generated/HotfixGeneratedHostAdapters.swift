@@ -44,10 +44,11 @@ nonisolated enum HotfixGeneratedHostAdapters {
                     noSideEffects: true
                 )
             ) { receiver, arguments in
-                guard receiver.token != 0,
-                      let pointer = UnsafeRawPointer(bitPattern: UInt(receiver.token)),
-                      let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
-                          as? HotfixableCalculator else { throw HotfixGeneratedAdapterError.invalidReceiver }
+                let resolved = try HotfixHostHandle.resolveObject(
+                    receiver,
+                    as: HotfixableCalculator.self
+                )
+                let object = resolved.value
                 let value = object.multiply(Int(bitPattern: UInt(arguments[0].bits)))
                 return HFMakeValue(HFValueKind(HFValueKindSignedInteger), UInt64(bitPattern: Int64(value)))
             })

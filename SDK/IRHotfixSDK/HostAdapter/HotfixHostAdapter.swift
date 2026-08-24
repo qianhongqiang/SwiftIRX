@@ -2,6 +2,46 @@ import Foundation
 
 nonisolated enum HotfixHostAdapterError: Error, Equatable, Sendable {
     case registrationFailed(status: HFStatus)
+    case invalidHostHandle(status: HFStatus)
+    case hostHandleTypeMismatch
+}
+
+nonisolated final class HotfixResolvedHostObject<Object: AnyObject> {
+    let value: Object
+    private let lease: OpaquePointer
+
+    init(value: Object, lease: OpaquePointer) {
+        self.value = value
+        self.lease = lease
+    }
+
+    deinit {
+        hf_host_handle_lease_release(lease)
+    }
+}
+
+nonisolated enum HotfixHostHandle {
+    static func resolveObject<Object: AnyObject>(
+        _ handle: HFHandle,
+        as type: Object.Type
+    ) throws -> HotfixResolvedHostObject<Object> {
+        var lease: OpaquePointer?
+        var pointer: UnsafeMutableRawPointer?
+        let status = hf_host_handle_resolve(handle, &lease, &pointer)
+        guard status == HFStatus(HFStatusApplied),
+              let lease,
+              let pointer else {
+            throw HotfixHostAdapterError.invalidHostHandle(status: status)
+        }
+        let candidate = Unmanaged<AnyObject>
+            .fromOpaque(UnsafeRawPointer(pointer))
+            .takeUnretainedValue()
+        guard let object = candidate as? Object else {
+            hf_host_handle_lease_release(lease)
+            throw HotfixHostAdapterError.hostHandleTypeMismatch
+        }
+        return HotfixResolvedHostObject(value: object, lease: lease)
+    }
 }
 
 nonisolated struct HotfixSwiftHostCall: Sendable {

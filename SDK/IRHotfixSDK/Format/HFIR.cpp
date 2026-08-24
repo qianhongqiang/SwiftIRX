@@ -206,7 +206,8 @@ bool verifyInstructionSemantics(const Package &package,
       return fail(error, path,
                   "phi requires register/block operand pairs and a result");
     for (std::size_t index = 0; index < instruction.operands.size(); index += 2) {
-      if (instruction.operands[index].kind != OperandKind::Register ||
+      if ((instruction.operands[index].kind != OperandKind::Register &&
+           instruction.operands[index].kind != OperandKind::Constant) ||
           instruction.operands[index].type != instruction.resultType ||
           instruction.operands[index + 1].kind != OperandKind::Block)
         return fail(error, path,
@@ -217,6 +218,14 @@ bool verifyInstructionSemantics(const Package &package,
   case Opcode::SubI64:
   case Opcode::MulI64:
   case Opcode::DivI64:
+  case Opcode::RemI64:
+  case Opcode::UDivI64:
+  case Opcode::AndI64:
+  case Opcode::OrI64:
+  case Opcode::XorI64:
+  case Opcode::ShiftLeftI64:
+  case Opcode::ShiftRightSignedI64:
+  case Opcode::ShiftRightUnsignedI64:
     return binaryArithmetic(ValueType::I64);
   case Opcode::AddF64:
   case Opcode::SubF64:
@@ -243,6 +252,17 @@ bool verifyInstructionSemantics(const Package &package,
                ? true
                : fail(error, path,
                       "comparison requires two equal scalar operand types");
+  case Opcode::Select:
+    if (!requireResult(function, instruction, ValueType::Void, error, path) ||
+        !requireOperandKinds(instruction,
+                             {OperandKind::Register, OperandKind::Register,
+                              OperandKind::Register}, error, path))
+      return false;
+    return instruction.operands[0].type == ValueType::Bool &&
+                   instruction.operands[1].type == instruction.resultType &&
+                   instruction.operands[2].type == instruction.resultType
+               ? true
+               : fail(error, path, "select operands have invalid types");
   case Opcode::Branch:
     return requireNoResult(instruction, error, path) &&
            requireOperandKinds(instruction, {OperandKind::Block}, error, path);
@@ -254,6 +274,24 @@ bool verifyInstructionSemantics(const Package &package,
                                error, path) &&
            (instruction.operands[0].type == ValueType::Bool ||
             fail(error, path, "conditional branch condition must be bool"));
+  case Opcode::Switch:
+    if (!requireNoResult(instruction, error, path) ||
+        instruction.operands.size() < 2 ||
+        instruction.operands.size() % 2 != 0 ||
+        instruction.operands[0].kind != OperandKind::Register ||
+        instruction.operands[1].kind != OperandKind::Block)
+      return fail(error, path,
+                  "switch requires condition/default and case/block pairs");
+    if (instruction.operands[0].type != ValueType::I64 &&
+        instruction.operands[0].type != ValueType::Bool)
+      return fail(error, path, "switch condition must be integer or bool");
+    for (std::size_t index = 2; index < instruction.operands.size(); index += 2) {
+      if (instruction.operands[index].kind != OperandKind::Constant ||
+          instruction.operands[index].type != instruction.operands[0].type ||
+          instruction.operands[index + 1].kind != OperandKind::Block)
+        return fail(error, path, "switch case has an invalid type");
+    }
+    return true;
   case Opcode::Return:
     if (!requireNoResult(instruction, error, path))
       return false;
@@ -362,6 +400,44 @@ bool verifyInstructionSemantics(const Package &package,
     return verifyCallArguments(callee.parameterTypes, false, instruction, 1,
                                error, path);
   }
+  case Opcode::StringConcat:
+    if (!requireResult(function, instruction, ValueType::String, error, path) ||
+        !requireOperandKinds(instruction,
+                             {OperandKind::Register, OperandKind::Register},
+                             error, path))
+      return false;
+    return (instruction.operands[0].type == ValueType::String &&
+            instruction.operands[1].type == ValueType::String) ||
+           fail(error, path, "string.concat requires two strings");
+  case Opcode::PackRect:
+    if (!requireResult(function, instruction, ValueType::Rect, error, path) ||
+        instruction.operands.size() != 4)
+      return false;
+    return std::all_of(instruction.operands.begin(), instruction.operands.end(),
+                       [](const Operand &operand) {
+                         return operand.kind == OperandKind::Register &&
+                                operand.type == ValueType::F64;
+                       }) || fail(error, path, "pack.rect requires four f64 values");
+  case Opcode::TruncateI64:
+  case Opcode::SignExtendI64:
+  case Opcode::ZeroExtendI64:
+    return requireResult(function, instruction, ValueType::I64, error, path) &&
+           requireOperandKinds(instruction,
+                               {OperandKind::Register, OperandKind::Constant},
+                               error, path) &&
+           (instruction.operands[0].type == ValueType::I64 ||
+            instruction.operands[0].type == ValueType::Bool) &&
+           instruction.operands[1].type == ValueType::I64;
+  case Opcode::SignedIntToF64:
+  case Opcode::UnsignedIntToF64:
+    return requireResult(function, instruction, ValueType::F64, error, path) &&
+           requireOperandKinds(instruction, {OperandKind::Register}, error, path) &&
+           instruction.operands[0].type == ValueType::I64;
+  case Opcode::F64ToSignedInt:
+  case Opcode::F64ToUnsignedInt:
+    return requireResult(function, instruction, ValueType::I64, error, path) &&
+           requireOperandKinds(instruction, {OperandKind::Register}, error, path) &&
+           instruction.operands[0].type == ValueType::F64;
   }
   return fail(error, path, "unknown opcode");
 }
@@ -438,16 +514,20 @@ const char *opcodeName(Opcode opcode) {
   case Opcode::SubF64: return "sub.f64";
   case Opcode::MulF64: return "mul.f64";
   case Opcode::DivF64: return "div.f64";
+  case Opcode::RemI64: return "rem.i64";
+  case Opcode::UDivI64: return "udiv.i64";
   case Opcode::CompareEqual: return "compare.eq";
   case Opcode::CompareNotEqual: return "compare.ne";
   case Opcode::CompareLessThan: return "compare.lt";
   case Opcode::CompareLessEqual: return "compare.le";
   case Opcode::CompareGreaterThan: return "compare.gt";
   case Opcode::CompareGreaterEqual: return "compare.ge";
+  case Opcode::Select: return "select";
   case Opcode::Branch: return "branch";
   case Opcode::ConditionalBranch: return "branch.conditional";
   case Opcode::Return: return "return";
   case Opcode::Trap: return "trap";
+  case Opcode::Switch: return "switch";
   case Opcode::LocalAllocate: return "local.alloc";
   case Opcode::LocalLoad: return "local.load";
   case Opcode::LocalStore: return "local.store";
@@ -458,6 +538,21 @@ const char *opcodeName(Opcode opcode) {
   case Opcode::StringConstant: return "string.constant";
   case Opcode::FunctionCall: return "function.call";
   case Opcode::HostCall: return "host.call";
+  case Opcode::StringConcat: return "string.concat";
+  case Opcode::PackRect: return "pack.rect";
+  case Opcode::TruncateI64: return "truncate.i64";
+  case Opcode::SignExtendI64: return "sign_extend.i64";
+  case Opcode::ZeroExtendI64: return "zero_extend.i64";
+  case Opcode::SignedIntToF64: return "signed_int_to.f64";
+  case Opcode::UnsignedIntToF64: return "unsigned_int_to.f64";
+  case Opcode::F64ToSignedInt: return "f64_to.signed_int";
+  case Opcode::F64ToUnsignedInt: return "f64_to.unsigned_int";
+  case Opcode::AndI64: return "and.i64";
+  case Opcode::OrI64: return "or.i64";
+  case Opcode::XorI64: return "xor.i64";
+  case Opcode::ShiftLeftI64: return "shift_left.i64";
+  case Opcode::ShiftRightSignedI64: return "shift_right.signed.i64";
+  case Opcode::ShiftRightUnsignedI64: return "shift_right.unsigned.i64";
   }
   return "invalid";
 }
@@ -469,7 +564,8 @@ bool isValidValueType(ValueType type) {
 
 bool isTerminator(Opcode opcode) {
   return opcode == Opcode::Branch || opcode == Opcode::ConditionalBranch ||
-         opcode == Opcode::Return || opcode == Opcode::Trap;
+         opcode == Opcode::Switch || opcode == Opcode::Return ||
+         opcode == Opcode::Trap;
 }
 
 bool verify(const Package &package, std::string &error) {
@@ -667,6 +763,13 @@ bool verify(const Package &package, std::string &error) {
       } else if (terminator.opcode == Opcode::ConditionalBranch) {
         successors[index].push_back(blockIndexByID.at(terminator.operands[1].index));
         successors[index].push_back(blockIndexByID.at(terminator.operands[2].index));
+      } else if (terminator.opcode == Opcode::Switch) {
+        successors[index].push_back(blockIndexByID.at(terminator.operands[1].index));
+        for (std::size_t operand = 3; operand < terminator.operands.size();
+             operand += 2) {
+          successors[index].push_back(
+              blockIndexByID.at(terminator.operands[operand].index));
+        }
       }
       for (std::size_t successor : successors[index])
         predecessors[successor].push_back(index);

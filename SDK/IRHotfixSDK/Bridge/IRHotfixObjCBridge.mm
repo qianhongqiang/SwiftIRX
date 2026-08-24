@@ -433,6 +433,21 @@ void *IRHFObjCCreateStringUTF8(const void *bytes, size_t byteCount) {
     return (__bridge_retained void *)string;
 }
 
+void *IRHFObjCCreateConcatenatedString(void *left, void *right) {
+    if (left == nullptr || right == nullptr) {
+        return nullptr;
+    }
+    id leftObject = (__bridge id)left;
+    id rightObject = (__bridge id)right;
+    if (![leftObject isKindOfClass:NSString.class] ||
+        ![rightObject isKindOfClass:NSString.class]) {
+        return nullptr;
+    }
+    NSString *result = [(NSString *)leftObject
+        stringByAppendingString:(NSString *)rightObject];
+    return (__bridge_retained void *)result;
+}
+
 int IRHFObjCIsMainThread(void) {
     return [NSThread isMainThread] ? 1 : 0;
 }

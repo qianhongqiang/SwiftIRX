@@ -48,6 +48,9 @@ IRHFObjCInvocationResult IRHFObjCConstruct(
 /// Creates an NSString from UTF-8 bytes and returns it at +1 ownership.
 void *IRHFObjCCreateStringUTF8(const void *bytes, size_t byteCount);
 
+/// Concatenates two NSString-compatible objects and returns +1 ownership.
+void *IRHFObjCCreateConcatenatedString(void *left, void *right);
+
 /// Returns nonzero when the caller is running on the process main thread.
 int IRHFObjCIsMainThread(void);
 

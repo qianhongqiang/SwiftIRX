@@ -223,11 +223,18 @@ final class HotfixExampleDetailViewController: UIViewController {
             frame.targetID = activation.targetID
             frame.signatureID = activation.signatureID
             frame.flags = HotfixABI.hasReceiverFlag
-            frame.receiver.token = UInt64(UInt(bitPattern: Unmanaged
-                .passUnretained(previewController)
-                .toOpaque()))
-            frame.receiver.kind = HotfixABI.objectHandleKind
-            frame.receiver.flags = HotfixABI.borrowedHandleFlags
+            let receiverPointer = Unmanaged.passUnretained(previewController).toOpaque()
+            let scopeStatus = hf_host_handle_scope_begin(
+                receiverPointer,
+                HFHandleKind(HFHandleKindObject),
+                &frame.receiver
+            )
+            guard scopeStatus == HFStatus(HFStatusApplied) else {
+                resultLabel.text = "Receiver 注册失败：HFStatus \(scopeStatus)"
+                resultLabel.textColor = .systemRed
+                return
+            }
+            defer { _ = hf_host_handle_scope_end(frame.receiver) }
 
             let status = hf_vm_invoke(&frame)
             guard status == HFStatus(HFStatusApplied) else {

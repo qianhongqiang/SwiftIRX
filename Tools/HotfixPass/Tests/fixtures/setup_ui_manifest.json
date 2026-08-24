@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "abiVersion": 2,
+  "abiVersion": 3,
   "targets": [
     {
       "symbol": "$s2IR14ViewControllerC7setupUI33_7B2304FAFD7CFEBD5E611A21DD4D9FE6LLyyF",
@@ -8,6 +8,16 @@
       "signatureID": "0x988cc6a5a1ee0058",
       "returnKind": "void",
       "argumentKinds": [],
+      "hasReceiver": true
+    },
+    {
+      "symbol": "dynamicRectTarget",
+      "targetID": "0xbc50a50c4286d8e5",
+      "signatureID": "0x9b066596b8b6c404",
+      "returnKind": "void",
+      "argumentKinds": [
+        "f64"
+      ],
       "hasReceiver": true
     }
   ]

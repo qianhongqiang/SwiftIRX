@@ -417,14 +417,14 @@ std::string renderSwift(const std::vector<Adapter> &adapters) {
            << "\n                )\n"
               "            ) { receiver, arguments in\n";
     if (adapter.callKind == "instanceMethod") {
-      stream << "                guard receiver.token != 0,\n"
-                "                      let pointer = UnsafeRawPointer(bitPattern: "
-                "UInt(receiver.token)),\n"
-                "                      let object = Unmanaged<AnyObject>"
-                ".fromOpaque(pointer).takeUnretainedValue()\n"
-                "                          as? "
+      stream << "                let resolved = try "
+                "HotfixHostHandle.resolveObject(\n"
+                "                    receiver,\n"
+                "                    as: "
              << adapter.receiverType
-             << " else { throw HotfixGeneratedAdapterError.invalidReceiver }\n";
+             << ".self\n"
+                "                )\n"
+                "                let object = resolved.value\n";
     }
     stream << "                ";
     if (adapter.returnKind != "void")

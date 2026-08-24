@@ -272,9 +272,10 @@ entry:
 }
 ```
 
-The runtime marshals the synthetic `%self` argument as a synchronous borrowed
-`HFHandle`; an ordinary null pointer remains nil. Patch execution is synchronous
-and the receiver is not retained. UIKit bridging requires the main thread.
+The trampoline registers synthetic `%self` in the Host Handle Table and passes
+only `token + generation + kind + ownership` in `HFHandle`. A borrowed entry is
+released after the synchronous invocation. Raw host addresses are exposed only
+inside a validated invocation lease. UIKit bridging requires the main thread.
 
 The patch author must make the entry return kind agree with the canonical
 signature return kind. The runtime checks entry parameter types, but it does not
@@ -289,8 +290,8 @@ The pass classifies lowered LLVM ABI, not Swift source spelling.
 | Part | Supported |
 | --- | --- |
 | Function | A defined `swiftcc` function that is not a generated hotfix symbol |
-| Return | `i64` (Swift `Int` on this 64-bit target), `i1` (Swift `Bool`), or `void` |
-| Value arguments | Zero through eight ordered `i64`/`i1` scalars |
+| Return | `i64` (`Int`), `i1` (`Bool`), `float` (`Float`), `double` (`Double`), or `void` |
+| Value arguments | Zero through eight ordered integer, boolean, Float, or Double scalars |
 | Receiver | None, or one `swiftself ptr` whose exact symbol is in the generated verified receiver manifest |
 | Instance context | Verified class method or synchronous actor method; the receiver does not count toward the eight-scalar limit |
 
@@ -301,8 +302,8 @@ bridge independently rejects a negative or greater-than-eight
 
 Shapes that normally lower outside the supported envelope include:
 
-- `String`, `Array`, tuples, floating-point values, closures, and other
-  aggregate or reference-counted Swift values.
+- `String`, `Array`, tuples, closures, and other aggregate or
+  reference-counted values as public target parameters or results.
 - Any ordinary pointer argument, including class/object arguments that are not
   the one verified receiver; pointer returns are also unsupported.
 - Unverified `swiftself`, multiple or malformed receivers, value-semantic
@@ -328,26 +329,24 @@ Swift 6.2.4 demangles supported actor contexts through that class-shaped path.
 
 Each eligible definition becomes a trampoline plus a private
 `<symbol>.hotfix_original` clone. The trampoline marshals each scalar into an
-`HFValue`, represents an optional object receiver as an `HFHandle`, fills a
+`HFValue`, registers an optional object receiver as an `HFHandle`, fills a
 versioned `HFPatchFrame`, and passes that one frame pointer to `hf_vm_invoke`.
 It returns the frame result only when the gateway returns `HFStatusApplied`;
 every other status calls the native clone with the untouched Swift ABI values.
 
-Fallback covers no active patch, a target/signature mismatch, malformed IR,
-missing entry function, entry parameter mismatch, interpreter error, execution
+Fallback covers no active patch, a target/signature mismatch, malformed HFIR,
+missing entry function, entry parameter mismatch, VM error, execution
 budget failure, malformed frame metadata, and unsupported result encoding.
 Malformed metadata includes an ABI-version or structure-size mismatch, a
 nonzero reserved field, more than eight arguments, a missing or unexpected
 argument array, unknown flags or kinds, noncanonical boolean bits, and an
-invalid receiver handle. The current interpreter path maps both an absent patch
-and execution failure to `HFStatusNoPatch`; the more specific public status
-values are reserved for later diagnostic propagation.
+invalid or stale receiver handle.
 
-The C entry point cannot prove that an arbitrary nonnull argument pointer or a
-borrowed-address handle token names readable mapped memory. It trusts those
-addresses after structural validation. Pass-generated calls provide valid,
-synchronous storage, but an erroneous external C caller can still cause a
-process crash rather than a native fallback.
+The Host Handle Table rejects stale token/generation pairs, tracks borrowed,
+strong, and weak entries, and creates a pinning invocation lease before a raw
+address reaches Objective-C, Swift, C, or C++ adapter code. Strong result
+handles transfer table-entry ownership to the VM; releasing a VM value
+invalidates the entry while an already-acquired lease remains valid.
 
 Direct recursive calls inside the native clone are rewritten to call the clone,
 so native recursion does not keep entering the trampoline. HFIR execution uses
@@ -426,9 +425,8 @@ The extractor revalidates the Manifest hashes, checks the compiled LLVM return,
 receiver, and ordered scalar parameters, assigns stable names to anonymous
 basic blocks, lowers Swift checked integer add/subtract/multiply to the VM's
 wrapping arithmetic semantics, replaces the compiler-only entry with the exact
-target symbol, and emits exactly one defined function. It rejects calls to
-non-inlined helpers defined in the Patch module; keep the first-version Patch
-implementation in the `hotfixPatch` body. Calls into UIKit, Objective-C, Swift
+target symbol, and extracts all directly reachable local helper functions into
+the same HFIR package. Calls into UIKit, Objective-C, Swift
 runtime functions, and intrinsics remain external and are handled or explicitly
 rejected by the VM at execution time.
 
@@ -436,6 +434,28 @@ The text output is an inspectable build intermediate. `HotfixPatchTool` lowers
 it to the publishable `.hfpatch`, which is the only patch format accepted by the
 app runtime. Rebuild it whenever the matching app's Manifest symbol or ABI
 changes.
+
+## Supported Swift Patch language subset
+
+Support is source-pattern driven rather than a promise to execute every LLVM
+opcode. The current published subset covers:
+
+- integer widths through an internal 64-bit representation, including
+  truncate/sign-extend/zero-extend, bitwise operations, remainder, and shifts;
+- Float/Double arithmetic, comparisons, and integer conversions;
+- `if`, `switch`, `select`, `phi`, loops, and the VM instruction budget;
+- scalar Optional/enum discriminators when Swift lowers them to integer
+  branches, plus scalar fields of local value-type storage;
+- constant and dynamic `CGRect` construction for Objective-C calls;
+- directly reachable, non-generic local helpers;
+- string literals and direct Swift string concatenation recognized by the
+  pinned toolchain.
+
+Public target parameters/results remain limited to the ABI table above.
+Closures, async code, throwing functions, protocol witness calls, resilient
+layout-dependent aggregates, and generic specialization are intentionally
+outside this version. Unsupported lowering fails patch construction with the
+offending LLVM instruction; it never supplies a guessed default value.
 
 ## Debug compromises and production limits
 

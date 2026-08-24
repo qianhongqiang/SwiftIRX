@@ -119,12 +119,12 @@ assert_receiver_instrumented() {
   grep -Fq "define private swiftcc i64 @\"$symbol.hotfix_original\"" "$ir_file"
   awk -v symbol="$symbol" '
     index($0, "define swiftcc") && index($0, symbol) { in_function = 1 }
-    in_function && /ptrtoint ptr %.* to i64/ { token = 1 }
-    in_function && /store i16 1, ptr/ { kind = 1 }
-    in_function && /store i16 -32767, ptr/ { flags = 1 }
+    in_function && /call i32 @hf_host_handle_scope_begin\(ptr %.*i16 1, ptr %/ { scope_begin = 1 }
+    in_function && /load %struct.HFHandle, ptr %/ { handle_load = 1 }
     in_function && /call i32 @hf_vm_invoke/ { invoked = 1 }
+    in_function && /call i32 @hf_host_handle_scope_end_ref\(ptr %/ { scope_end = 1 }
     in_function && /^}/ { in_function = 0 }
-    END { exit token && kind && flags && invoked ? 0 : 1 }
+    END { exit scope_begin && handle_load && invoked && scope_end ? 0 : 1 }
   ' "$ir_file"
   name_global="$(
     grep -F "c\"$symbol\\00\"" "$ir_file" |
@@ -153,7 +153,7 @@ IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$SCALAR_MANIFEST" "$OPT" \
   -S "$FIXTURE" \
   -o "$TEMP/named.ll" \
   2>"$TEMP/named.stderr"
-EXPECTED_DIAGNOSTICS=$'[HotfixPass] skip nineScalarArguments: too many scalar arguments\n[HotfixPass] skip unverifiedReceiver: unverified swiftself receiver\n[HotfixPass] skip unsupported: unsupported return type\n[HotfixPass] skip unsupportedPointer: unsupported non-receiver pointer argument\n[HotfixPass] skip variadicTarget: variadic function'
+EXPECTED_DIAGNOSTICS=$'[HotfixPass] skip nineScalarArguments: too many scalar arguments\n[HotfixPass] skip unverifiedReceiver: unverified swiftself receiver\n[HotfixPass] skip unsupportedPointer: unsupported non-receiver pointer argument\n[HotfixPass] skip variadicTarget: variadic function'
 if [[ "$(<"$TEMP/named.stderr")" != "$EXPECTED_DIAGNOSTICS" ]]; then
   echo "error: named pass diagnostics differ from the expected deterministic output" >&2
   diff -u <(printf '%s\n' "$EXPECTED_DIAGNOSTICS") "$TEMP/named.stderr" >&2 || true
@@ -184,15 +184,15 @@ if [[ "$(grep -Fc 'define private swiftcc i64 @integerTarget.hotfix_original' "$
   echo "error: repeated pass instrumentation was not idempotent" >&2
   exit 1
 fi
-if ! grep -Fq '@llvm.compiler.used = appending global [20 x ptr]' "$TEMP/repeated.ll"; then
+if ! grep -Fq '@llvm.compiler.used = appending global [22 x ptr]' "$TEMP/repeated.ll"; then
   echo "error: repeated pass duplicated retained function entries" >&2
   exit 1
 fi
-if [[ "$(grep -Fc 'section "__DATA,__hotfix"' "$TEMP/repeated.ll")" != "10" ]]; then
+if [[ "$(grep -Fc 'section "__DATA,__hotfix"' "$TEMP/repeated.ll")" != "11" ]]; then
   echo "error: repeated pass duplicated or omitted hotfix descriptors" >&2
   exit 1
 fi
-if ! grep -Fq '@llvm.used = appending global [10 x ptr]' "$TEMP/repeated.ll"; then
+if ! grep -Fq '@llvm.used = appending global [11 x ptr]' "$TEMP/repeated.ll"; then
   echo "error: repeated pass duplicated retained descriptor entries" >&2
   exit 1
 fi

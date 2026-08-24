@@ -19,6 +19,8 @@ enum {
     /// Host execution may already have produced externally visible effects.
     /// A trampoline must never fall back to the original implementation.
     HFStatusExecutionCommitted = 10,
+    HFStatusStaleHandle = 11,
+    HFStatusHandleTableFull = 12,
 };
 
 #endif /* HFStatus_h */
