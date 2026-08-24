@@ -190,4 +190,36 @@ struct IRTests {
         #expect(status == HFStatus(HFStatusApplied))
         #expect(result.bits == 22)
     }
+
+    @Test func bundledSyntaxExamplePatchesExecuteThroughReleaseTrampolines() throws {
+        let manager = HotfixManager.shared
+
+        func withPatch<T>(
+            _ resource: String,
+            run: () -> T
+        ) throws -> T {
+            let url = try #require(Bundle.main.url(
+                forResource: resource,
+                withExtension: "hfpatch"
+            ))
+            let activation = try manager.installAndActivate(
+                binaryPatch: Data(contentsOf: url)
+            )
+            defer { manager.deactivate(activation) }
+            return run()
+        }
+
+        #expect(try withPatch("HotfixInteger") {
+            hotfixExampleInteger(10)
+        } == 110)
+        #expect(try withPatch("HotfixBranch") {
+            hotfixExampleBranch(55)
+        } == true)
+        #expect(try withPatch("HotfixInstance") {
+            HotfixExampleCalculator().multiply(8)
+        } == 24)
+        #expect(try withPatch("HotfixHostAdapter") {
+            hotfixExampleHostAdapter(10)
+        } == 22)
+    }
 }
