@@ -1,0 +1,34 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ "${IR_HOTFIX_INSTRUMENTATION:-NO}" != "YES" || \
+      "${IR_HOTFIX_PATCH_MODE:-0}" == "1" ]]; then
+  exit 0
+fi
+
+TOOL="$DERIVED_FILE_DIR/HotfixPassProduct/HotfixManifestTool"
+TARGET_OUTPUT="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/HotfixTargetManifest.json"
+ADAPTER_INPUT="$DERIVED_FILE_DIR/HotfixHostAdapterManifest.json"
+ADAPTER_OUTPUT="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/HotfixHostAdapterManifest.json"
+if [[ ! -x "$TOOL" ]]; then
+  echo "error: HotfixManifestTool is missing: $TOOL" >&2
+  exit 1
+fi
+if [[ ! -r "$ADAPTER_INPUT" ]]; then
+  echo "error: generated Host Adapter Manifest is missing: $ADAPTER_INPUT" >&2
+  exit 1
+fi
+
+MANIFESTS=()
+if [[ -d "$OBJECT_FILE_DIR_normal" ]]; then
+  while IFS= read -r -d '' MANIFEST; do
+    MANIFESTS+=("$MANIFEST")
+  done < <(find "$OBJECT_FILE_DIR_normal" \
+    -type f \
+    -name '*.hotfix-targets.json' \
+    -print0)
+fi
+mkdir -p "$(dirname "$TARGET_OUTPUT")"
+"$TOOL" merge "$TARGET_OUTPUT" "${MANIFESTS[@]}"
+cp "$ADAPTER_INPUT" "$ADAPTER_OUTPUT"

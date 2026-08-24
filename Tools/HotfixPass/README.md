@@ -84,6 +84,7 @@ cmake --build Tools/HotfixPass/.cmake-build --config Release
 The plugin and host executables are written to
 `Tools/HotfixPass/.build/libHotfixPass.dylib` and
 `Tools/HotfixPass/.build/HotfixManifestTool` and
+`Tools/HotfixPass/.build/HotfixAdapterTool` and
 `Tools/HotfixPass/.build/HotfixPatchTool` and
 `Tools/HotfixPass/.build/HotfixPackageTool`. Both build directories are generated
 and ignored by Git.
@@ -96,6 +97,7 @@ Tools/HotfixPass/Tests/verify-swift-load.sh
 Tools/HotfixPass/Tests/verify-wrapper.sh
 Tools/HotfixPass/Tests/verify-patch-build.sh
 Tools/HotfixPass/Tests/verify-hfpatch-format.sh
+Tools/HotfixPass/Tests/verify-host-adapters.sh
 ```
 
 `run-pass-tests.sh` checks scalar and receiver classification, deterministic
@@ -162,14 +164,14 @@ The `IR` target has two intentionally different compilation paths:
 | Configuration | Swift compilation |
 | --- | --- |
 | Debug | Xcode sets `SWIFT_EXEC=Tools/HotfixPass/swiftc-hotfix`, disables the integrated driver and batch mode, builds the host plugin, and instruments each eligible app Swift object automatically. |
-| Release | Xcode uses its native Apple Swift compiler path. The wrapper, bridging-header fingerprint, and pass build phase do not instrument Release objects. |
+| Release | Uses the same wrapper and per-file instrumentation path, then runs LLVM's optimized pipeline and `llc -O2`. The archived app therefore contains the trampolines and Target Manifest required by later patch branches. |
 
 The wrapper recursively expands frontend `@response-file` arguments before it
 identifies the primary source and output. Quoting, nested files, paths containing
 spaces, missing files, and cycles are covered by the wrapper test. Relative
 response paths are resolved from the frontend process's working directory.
 
-The Debug build phase hashes `CMakeLists.txt`, the pass and host-tool sources, the public
+The Debug and Release build phase hashes `CMakeLists.txt`, the pass and host-tool sources, the public
 `SDK/IRHotfixSDK/ABI` headers, the receiver manifest generator, and the wrapper
 into `HotfixInstrumentationStamp.h`. A changed tool fingerprint changes this
 bridging-header input and invalidates all app Swift objects. When the hash is
@@ -177,10 +179,18 @@ unchanged, the build phase preserves the stamp timestamp so an incremental
 no-op remains incremental. Response-file contents still participate through
 Xcode's normal compile invocation; they are not part of this tool fingerprint.
 
-The wrapper forwards object jobs whose primary basename is `Hotfix.swift` or
-`HotfixHostAdapter.swift` directly to Apple `swift-frontend`. This prevents the
-runtime and Swift host-adapter gateways from instrumenting themselves.
+The wrapper forwards object jobs whose primary basename is `Hotfix.swift`,
+`HotfixHostAdapter.swift`, or `HotfixGeneratedHostAdapters.swift` directly to
+Apple `swift-frontend`. This prevents the runtime and generated gateways from
+instrumenting themselves.
 Rename or split those files only after updating and testing the exclusion rule.
+
+Release input is lowered with Swift SIL optimization disabled so the LLVM pass
+sees the complete target set before private functions can be inlined away. The
+transformed module then runs LLVM `default<O2>` and `llc -O2`. This preserves
+patchability and native code optimization, but it does not recover Swift-only
+SIL optimizations; that tradeoff remains until instrumentation moves into a
+compiler-compatible Swift pipeline.
 
 To run focused integration tests on an installed simulator:
 

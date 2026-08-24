@@ -1,0 +1,86 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ "${IR_HOTFIX_INSTRUMENTATION:-NO}" != "YES" ]]; then
+  exit 0
+fi
+
+LLVM_CONFIG=/opt/homebrew/opt/llvm@19/bin/llvm-config
+CMAKE=/opt/homebrew/bin/cmake
+if [[ ! -x "$LLVM_CONFIG" ]]; then
+  echo "error: Homebrew LLVM 19 llvm-config is missing: $LLVM_CONFIG" >&2
+  exit 1
+fi
+if [[ ! -x "$CMAKE" ]]; then
+  echo "error: Homebrew CMake is missing: $CMAKE" >&2
+  exit 1
+fi
+if [[ "$("$LLVM_CONFIG" --version)" != "19.1.7" ]]; then
+  echo "error: HotfixPass requires Homebrew LLVM 19.1.7" >&2
+  exit 1
+fi
+
+PRODUCT_DIR="$DERIVED_FILE_DIR/HotfixPassProduct"
+STAMP="$PRODUCT_DIR/HotfixInstrumentationStamp.h"
+HOST_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+HOST_ARCH="$(uname -m)"
+HOST_DEPLOYMENT_TARGET="$(sw_vers -productVersion | awk -F. '{ print $1 ".0" }')"
+HOST_TARGET="${HOST_ARCH}-apple-macosx${HOST_DEPLOYMENT_TARGET}"
+CMAKE_ENV=(
+  env -u IPHONEOS_DEPLOYMENT_TARGET
+  SDKROOT="$HOST_SDK"
+  MACOSX_DEPLOYMENT_TARGET="$HOST_DEPLOYMENT_TARGET"
+)
+
+"${CMAKE_ENV[@]}" "$CMAKE" \
+  -S "$SRCROOT/Tools/HotfixPass" \
+  -B "$DERIVED_FILE_DIR/HotfixPass" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_SYSTEM_NAME=Darwin \
+  -DCMAKE_OSX_SYSROOT="$HOST_SDK" \
+  -DCMAKE_OSX_ARCHITECTURES="$HOST_ARCH" \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET="$HOST_DEPLOYMENT_TARGET" \
+  -DCMAKE_C_COMPILER_TARGET="$HOST_TARGET" \
+  -DCMAKE_CXX_COMPILER_TARGET="$HOST_TARGET" \
+  -DHOTFIX_PASS_OUTPUT_DIRECTORY="$PRODUCT_DIR"
+"${CMAKE_ENV[@]}" "$CMAKE" \
+  --build "$DERIVED_FILE_DIR/HotfixPass" \
+  --config Release
+
+test -f "$PRODUCT_DIR/libHotfixPass.dylib"
+test -x "$PRODUCT_DIR/HotfixAdapterTool"
+test -x "$PRODUCT_DIR/HotfixManifestTool"
+test -x "$PRODUCT_DIR/HotfixPatchTool"
+test -x "$PRODUCT_DIR/HotfixPackageTool"
+
+GENERATED_DIRECTORY="$SRCROOT/SDK/IRHotfixSDK/HostAdapter/Generated"
+mkdir -p "$GENERATED_DIRECTORY"
+"$PRODUCT_DIR/HotfixAdapterTool" generate \
+  "$SRCROOT/HotfixConfig/HotfixHostAdapters.json" \
+  "$GENERATED_DIRECTORY/HotfixGeneratedHostAdapters.swift" \
+  "$GENERATED_DIRECTORY/HFGeneratedHostAdapters.mm" \
+  "$DERIVED_FILE_DIR/HotfixHostAdapterManifest.json"
+
+FINGERPRINT="$(
+  shasum -a 256 \
+    "$SRCROOT/Tools/HotfixPass/CMakeLists.txt" \
+    "$SRCROOT/Tools/HotfixPass/Sources/HotfixPass.cpp" \
+    "$SRCROOT/Tools/HotfixPass/Sources/HotfixAdapterTool.cpp" \
+    "$SRCROOT/Tools/HotfixPass/Sources/HotfixManifestTool.cpp" \
+    "$SRCROOT/Tools/HotfixPass/Sources/HotfixPatchTool.cpp" \
+    "$SRCROOT/Tools/HotfixPass/generate-class-receiver-manifest.sh" \
+    "$SRCROOT/Tools/HotfixPass/swiftc-hotfix" \
+    "$SRCROOT/HotfixConfig/HotfixHostAdapters.json" \
+    "$SRCROOT/SDK/IRHotfixSDK/ABI/"*.h |
+    shasum -a 256 |
+    awk '{ print $1 }'
+)"
+TEMP_STAMP="$PRODUCT_DIR/.HotfixInstrumentationStamp.$$"
+printf '#define IR_HOTFIX_INSTRUMENTATION_FINGERPRINT "%s"\n' \
+  "$FINGERPRINT" >"$TEMP_STAMP"
+if [[ ! -f "$STAMP" ]] || ! cmp -s "$TEMP_STAMP" "$STAMP"; then
+  mv -f "$TEMP_STAMP" "$STAMP"
+else
+  find "$TEMP_STAMP" -delete
+fi

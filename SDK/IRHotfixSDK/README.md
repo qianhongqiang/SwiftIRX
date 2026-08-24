@@ -28,9 +28,14 @@ IRHotfixSDK/
 │   ├── HFIRRuntime.h
 │   └── HFIRRuntime.cpp
 ├── HostAdapter/
+│   ├── Generated/
+│   │   ├── HFGeneratedHostAdapters.mm
+│   │   └── HotfixGeneratedHostAdapters.swift
+│   ├── HFGeneratedHostAdapters.h
 │   ├── HFHostAdapter.h
 │   ├── HFHostAdapter.hpp
 │   ├── HFHostAdapterRegistry.cpp
+│   ├── HotfixHostAdapterManifest.swift
 │   └── HotfixHostAdapter.swift
 └── Support/
     └── IRHotfix-Bridging-Header.h
@@ -61,6 +66,10 @@ IRHotfixSDK/
   thunks. `HotfixHostAdapter.swift` provides one shared C trampoline backed by
   Swift closures, so each Swift function does not require handwritten marshal
   code.
+- `HotfixConfig/HotfixHostAdapters.json` is the app's declarative adapter
+  allowlist. `HotfixAdapterTool` validates it and generates the Swift/C/C++
+  registration translation units plus `HotfixHostAdapterManifest.json` before
+  Sources compile. `HotfixManager` installs those registrations exactly once.
 - `Bridge/IRHotfixObjCBridge.h` exposes the Objective-C invocation ABI used by VM
   cores.
 - `Bridge/IRHotfixObjCBridge.mm` resolves Objective-C method signatures at
@@ -96,6 +105,16 @@ External calls in patch source lower to `host.call` imports. The lowerer uses
 explicit LLVM calling-convention and `swiftself` metadata to classify them as
 `native-c`, `native-swift`, or `native-cxx`. Unsupported varargs, indirect
 calls, hidden ABI parameters, and noncanonical integer widths fail compilation.
+
+For released functions, add one descriptor to
+`HotfixConfig/HotfixHostAdapters.json`. Swift function and instance-method
+bindings generate typed Swift marshal closures. C functions and C++ functions
+or instance methods generate calls to the templated gateway in an
+Objective-C++ translation unit; their declaration header must be named in the
+descriptor. Xcode generates and bundles a deterministic
+`HotfixHostAdapterManifest.json`, so available native imports can be archived
+alongside `HotfixTargetManifest.json` without maintaining registration code by
+hand.
 
 A Swift host function can be registered once at app startup:
 
@@ -152,8 +171,8 @@ returns `HFStatusExecutionCommitted` and cannot fall back to the original body.
 
 ## Target Manifest
 
-Debug instrumentation generates one descriptor-derived sidecar manifest for
-each Swift object. After the target's Sources phase, Xcode merges those files
+Debug and Release instrumentation generate one descriptor-derived sidecar
+manifest for each Swift object. After the target's Sources phase, Xcode merges those files
 into `HotfixTargetManifest.json` in the app bundle. The JSON root contains
 `schemaVersion`, `abiVersion`, and a deterministic symbol-sorted `targets`
 array. Each target records:
@@ -190,6 +209,8 @@ private func setupUI() {
 ```
 
 Keep the released app's `HotfixTargetManifest.json` as the immutable baseline,
+and archive its `HotfixHostAdapterManifest.json` beside it for native-import
+auditing,
 then run from the repository root:
 
 ```bash

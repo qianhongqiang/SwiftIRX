@@ -178,6 +178,27 @@ if [[ "$patch_mode" == "1" ]]; then
   )
 fi
 
+# Keep every frontend job (module emission, bridging-header PCH, and object
+# emission) on the same optimization mode. Instrumented Release objects need
+# unoptimized SIL so private targets still exist when the LLVM pass runs.
+requested_llc_optimization="O0"
+normalized_arguments=()
+for argument in "${arguments[@]}"; do
+  case "$argument" in
+    -O | -Osize | -Ounchecked)
+      requested_llc_optimization="O2"
+      normalized_arguments+=("-Onone")
+      ;;
+    -Onone)
+      normalized_arguments+=("$argument")
+      ;;
+    *)
+      normalized_arguments+=("$argument")
+      ;;
+  esac
+done
+arguments=("${normalized_arguments[@]}")
+
 if ! contains_argument -c "${arguments[@]}" &&
   ! contains_argument -emit-object "${arguments[@]}"; then
   exec "$REAL_FRONTEND" "${arguments[@]}"
@@ -249,7 +270,7 @@ fi
 [[ -n "$output_file" ]] || fail "object compile job has no output path"
 
 case "$(basename "$primary_file")" in
-  Hotfix.swift | HotfixHostAdapter.swift)
+  Hotfix.swift | HotfixHostAdapter.swift | HotfixGeneratedHostAdapters.swift)
     diagnose "forwarding excluded source: $primary_file"
     sidecar="$output_file.hotfix-targets.json"
     if [[ -f "$sidecar" ]]; then
@@ -316,9 +337,13 @@ cleanup() {
 trap cleanup EXIT
 
 bitcode_arguments=()
+llc_optimization="$requested_llc_optimization"
 for ((index = 0; index < ${#arguments[@]}; ++index)); do
   argument="${arguments[index]}"
   case "$argument" in
+    -Onone)
+      bitcode_arguments+=("$argument")
+      ;;
     -c | -emit-object)
       bitcode_arguments+=("-emit-bc")
       ;;
@@ -378,7 +403,7 @@ if [[ "$patch_mode" == "1" ]]; then
 
   "$LLC" \
     -filetype=obj \
-    -O0 \
+    -"$llc_optimization" \
     -relocation-model=pic \
     "$temp/input.bc" \
     -o "$atomic_output"
@@ -406,18 +431,28 @@ IR_HOTFIX_CLASS_RECEIVER_MANIFEST="$temp/receivers.txt" "$OPT" \
   "$temp/input.bc" \
   -o "$temp/transformed.bc"
 
+codegen_bitcode="$temp/transformed.bc"
+if [[ "$llc_optimization" == "O2" ]]; then
+  "$OPT" \
+    -passes='default<O2>' \
+    -verify-each \
+    "$temp/transformed.bc" \
+    -o "$temp/optimized.bc"
+  codegen_bitcode="$temp/optimized.bc"
+fi
+
 atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").hotfix.XXXXXX")"
 atomic_manifest="$(
   mktemp "$output_directory/.$(basename "$output_file").hotfix-targets.XXXXXX"
 )"
 "$target_manifest_tool" extract \
   "$atomic_manifest" \
-  "$temp/transformed.bc"
+  "$codegen_bitcode"
 "$LLC" \
   -filetype=obj \
-  -O0 \
+  -"$llc_optimization" \
   -relocation-model=pic \
-  "$temp/transformed.bc" \
+  "$codegen_bitcode" \
   -o "$atomic_output"
 mv -f "$atomic_output" "$output_file"
 atomic_output=""

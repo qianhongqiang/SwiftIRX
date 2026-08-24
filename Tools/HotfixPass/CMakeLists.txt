@@ -27,6 +27,17 @@ target_include_directories(
 )
 target_link_libraries(HotfixManifestTool PRIVATE LLVM)
 
+add_executable(HotfixAdapterTool Sources/HotfixAdapterTool.cpp)
+target_compile_features(HotfixAdapterTool PRIVATE cxx_std_20)
+target_include_directories(HotfixAdapterTool SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(
+  HotfixAdapterTool
+  PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/HostAdapter"
+)
+target_link_libraries(HotfixAdapterTool PRIVATE LLVM)
+
 add_executable(
   HotfixPatchTool
   Sources/HotfixPatchTool.cpp
@@ -109,6 +120,12 @@ set_target_properties(
 
 set_target_properties(
   HotfixManifestTool
+  PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(
+  HotfixAdapterTool
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
 )

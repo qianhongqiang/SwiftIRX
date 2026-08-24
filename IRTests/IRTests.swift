@@ -46,6 +46,24 @@ struct IRTests {
         })
     }
 
+    @Test func bundledHostAdapterManifestMatchesGeneratedGateways() throws {
+        let url = try #require(Bundle.main.url(
+            forResource: HotfixHostAdapterManifest.resourceName,
+            withExtension: "json"
+        ))
+        let manifest = try JSONDecoder().decode(
+            HotfixHostAdapterManifest.self,
+            from: Data(contentsOf: url)
+        )
+
+        #expect(manifest.schemaVersion == HotfixHostAdapterManifest.supportedSchemaVersion)
+        #expect(manifest.abiVersion == UInt32(HF_HOST_ADAPTER_ABI_VERSION))
+        #expect(manifest.adapter(symbol: "$s2IR13hotfixableAddyS2iF")?.language == .swift)
+        #expect(manifest.adapter(
+            symbol: "$s2IR20HotfixableCalculatorC8multiplyyS2iF"
+        )?.hasReceiver == true)
+    }
+
     @Test func binaryGatewayRejectsOldABIAndMissingPatch() {
         var oldFrame = HFMakePatchFrame()
         oldFrame.abiVersion = 1
@@ -137,5 +155,39 @@ struct IRTests {
         #expect(status == HFStatus(HFStatusApplied))
         #expect(result.kind == HFValueKind(HFValueKindSignedInteger))
         #expect(result.bits == 42)
+    }
+
+    @Test func generatedSwiftHostAdapterRegistersWithoutHandwrittenCode() {
+        _ = HotfixManager()
+        let symbol = "$s2IR13hotfixableAddyS2iF"
+        let argumentKinds = [HFValueKind(HFValueKindSignedInteger)]
+        var descriptor = HFHostCallDescriptor()
+        var argument = HFMakeValue(HFValueKind(HFValueKindSignedInteger), 21)
+        var result = HFMakeValue(HFValueKind(HFValueKindInvalid), 0)
+        let status = symbol.withCString { symbolPointer in
+            argumentKinds.withUnsafeBufferPointer { kinds in
+                descriptor.abiVersion = UInt32(HF_HOST_ADAPTER_ABI_VERSION)
+                descriptor.structSize = UInt32(MemoryLayout<HFHostCallDescriptor>.size)
+                descriptor.importID = hf_host_call_id(symbolPointer)
+                descriptor.language = HFHostLanguage(HFHostLanguageSwift)
+                descriptor.callKind = HFHostCallKind(HFHostCallKindFunction)
+                descriptor.returnKind = HFValueKind(HFValueKindSignedInteger)
+                descriptor.argumentCount = 1
+                descriptor.flags = UInt32(HFHostCallFlagNoSideEffects)
+                descriptor.name = symbolPointer
+                descriptor.argumentKinds = kinds.baseAddress
+                descriptor.signatureID = hf_host_call_signature_id(&descriptor)
+                return hf_host_adapter_invoke(
+                    &descriptor,
+                    HFInvalidHandle(),
+                    &argument,
+                    1,
+                    &result
+                )
+            }
+        }
+
+        #expect(status == HFStatus(HFStatusApplied))
+        #expect(result.bits == 22)
     }
 }

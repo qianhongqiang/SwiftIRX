@@ -1,6 +1,7 @@
 import Foundation
 
 nonisolated enum HotfixBinaryPatchError: Error, Equatable, Sendable {
+    case hostAdapterBootstrapFailed(status: HFStatus)
     case installFailed(status: HFStatus)
     case activationFailed(status: HFStatus)
 }
@@ -104,10 +105,19 @@ nonisolated struct HotfixBinaryActivation: @unchecked Sendable {
 nonisolated final class HotfixManager: @unchecked Sendable {
     static let shared = HotfixManager()
 
-    init() {}
+    private let hostAdapterBootstrapStatus: HFStatus
+
+    init() {
+        hostAdapterBootstrapStatus = HotfixGeneratedHostAdapters.registerAll()
+    }
 
     @discardableResult
     func installAndActivate(binaryPatch data: Data) throws -> HotfixBinaryActivation {
+        guard hostAdapterBootstrapStatus == HFStatus(HFStatusApplied) else {
+            throw HotfixBinaryPatchError.hostAdapterBootstrapFailed(
+                status: hostAdapterBootstrapStatus
+            )
+        }
         var handle = HFIRPatchHandle()
         let installStatus = data.withUnsafeBytes { bytes in
             hf_hfir_vm_install(bytes.baseAddress, bytes.count, &handle)

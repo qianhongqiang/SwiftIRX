@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "adapters": [
+    {
+      "language": "swift",
+      "symbol": "$s19HostAdapterFixtures11doubleValueyS2iF",
+      "callKind": "function",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "binding": "doubleValue",
+      "noSideEffects": true
+    },
+    {
+      "language": "c",
+      "symbol": "ir_test_c_increment",
+      "callKind": "function",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "binding": "ir_test_c_increment",
+      "header": "HotfixAdapterFixture.hpp",
+      "noSideEffects": true
+    },
+    {
+      "language": "cxx",
+      "symbol": "_ZN13IRTestCounter8multiplyEl",
+      "owner": "IRTestCounter",
+      "callKind": "instanceMethod",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "binding": "IRTestCounter::multiply",
+      "receiverType": "IRTestCounter",
+      "header": "HotfixAdapterFixture.hpp",
+      "noSideEffects": true
+    }
+  ]
+}
