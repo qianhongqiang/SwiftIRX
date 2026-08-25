@@ -1,0 +1,309 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REAL_CLANG="${IR_HOTFIX_REAL_CLANG:-$(xcrun --find clang)}"
+LLVM_ROOT="${IR_HOTFIX_LLVM_ROOT:-/opt/homebrew/opt/llvm@19}"
+INSTRUMENTING_CLANG="${IR_HOTFIX_INSTRUMENTING_CLANG:-$LLVM_ROOT/bin/clang}"
+OPT="${IR_HOTFIX_OPT:-$LLVM_ROOT/bin/opt}"
+LLC="${IR_HOTFIX_LLC:-$LLVM_ROOT/bin/llc}"
+
+fail() {
+  echo "[ClangHotfix] error: $*" >&2
+  exit 1
+}
+
+patch_mode="${IR_HOTFIX_PATCH_MODE:-0}"
+
+response_arguments=()
+response_stack_keys=()
+response_stack_paths=()
+
+tokenize_response_file() {
+  local path="$1"
+  local LC_ALL=C
+  local content=""
+  local token=""
+  local character
+  local quote
+  local index=0
+  local length
+
+  IFS= read -r -d '' content <"$path" || true
+  length=${#content}
+  response_tokens=()
+  while ((index < length)); do
+    if [[ -z "$token" ]]; then
+      while ((index < length)); do
+        character="${content:index:1}"
+        case "$character" in
+          ' ' | $'\t' | $'\r' | $'\n') ((++index)) ;;
+          *) break ;;
+        esac
+      done
+      ((index < length)) || break
+    fi
+
+    character="${content:index:1}"
+    if [[ "$character" == '\' ]] && ((index + 1 < length)); then
+      ((index += 2))
+      token+="${content:index-1:1}"
+      continue
+    fi
+    if [[ "$character" == '"' || "$character" == "'" ]]; then
+      quote="$character"
+      ((++index))
+      while ((index < length)) && [[ "${content:index:1}" != "$quote" ]]; do
+        if [[ "${content:index:1}" == '\' ]] && ((index + 1 < length)); then
+          ((++index))
+        fi
+        token+="${content:index:1}"
+        ((++index))
+      done
+      ((index < length)) || fail "unterminated quote in response file: $path"
+      ((++index))
+      continue
+    fi
+
+    case "$character" in
+      ' ' | $'\t' | $'\r' | $'\n')
+        [[ -z "$token" ]] || response_tokens+=("$token")
+        token=""
+        ((++index))
+        ;;
+      *)
+        token+="$character"
+        ((++index))
+        ;;
+    esac
+  done
+  [[ -z "$token" ]] || response_tokens+=("$token")
+}
+
+expand_argument() {
+  local argument="$1"
+  if [[ "$argument" != @* ]]; then
+    response_arguments+=("$argument")
+    return
+  fi
+
+  local response_path="${argument#@}"
+  if [[ "$response_path" != /* ]]; then
+    response_path="$PWD/$response_path"
+  fi
+  [[ -r "$response_path" && -f "$response_path" ]] ||
+    fail "response file is not readable: $response_path"
+  local response_key
+  response_key="$(stat -f '%d:%i' "$response_path")" ||
+    fail "cannot inspect response file: $response_path"
+  local stack_index
+  for ((stack_index = 0; stack_index < ${#response_stack_keys[@]}; ++stack_index)); do
+    if [[ "${response_stack_keys[stack_index]}" == "$response_key" ]]; then
+      fail "response file cycle: ${response_stack_paths[stack_index]} -> $response_path"
+    fi
+  done
+
+  response_stack_keys+=("$response_key")
+  response_stack_paths+=("$response_path")
+  tokenize_response_file "$response_path"
+  local tokens=("${response_tokens[@]}")
+  local token
+  for token in "${tokens[@]}"; do
+    expand_argument "$token"
+  done
+  unset 'response_stack_keys[${#response_stack_keys[@]}-1]'
+  unset 'response_stack_paths[${#response_stack_paths[@]}-1]'
+}
+
+for compiler_argument in "$@"; do
+  expand_argument "$compiler_argument"
+done
+arguments=("${response_arguments[@]}")
+output_file=""
+source_file=""
+is_compile=0
+optimization="O2"
+for ((index = 0; index < ${#arguments[@]}; ++index)); do
+  argument="${arguments[index]}"
+  case "$argument" in
+    -c) is_compile=1 ;;
+    -o)
+      ((index + 1 < ${#arguments[@]})) || fail "-o has no value"
+      ((++index))
+      output_file="${arguments[index]}"
+      ;;
+    -O0) optimization="O0" ;;
+    *.c | *.cc | *.cpp | *.cxx | *.m | *.mm)
+      if [[ -n "$source_file" && "$source_file" != "$argument" ]]; then
+        exec "$REAL_CLANG" "${arguments[@]}"
+      fi
+      source_file="$argument"
+      ;;
+  esac
+done
+
+if [[ "$is_compile" != "1" || -z "$source_file" || -z "$output_file" ]]; then
+  exec "$REAL_CLANG" "${arguments[@]}"
+fi
+
+if ! grep -Eq 'IR_HOTFIX_TARGET|ir_hotfix_target' "$source_file"; then
+  if [[ -f "$output_file.hotfix-targets.json" ]]; then
+    find "$output_file.hotfix-targets.json" -delete
+  fi
+  if [[ -d "$output_file.hotfix-patches" ]]; then
+    find "$output_file.hotfix-patches" -type f -delete
+    find "$output_file.hotfix-patches" -depth -type d -empty -delete
+  fi
+  exec "$REAL_CLANG" "${arguments[@]}"
+fi
+
+hotfix_product_directory=""
+if [[ -n "${DERIVED_FILE_DIR:-}" ]]; then
+  hotfix_product_directory="$DERIVED_FILE_DIR/HotfixPassProduct"
+fi
+for argument in "${arguments[@]}"; do
+  case "$argument" in
+    -I*/HotfixPassProduct)
+      hotfix_product_directory="${argument#-I}"
+      ;;
+  esac
+done
+
+plugin="${IR_HOTFIX_PLUGIN_PATH:-$hotfix_product_directory/libHotfixPass.dylib}"
+clang_plugin="${IR_HOTFIX_CLANG_PLUGIN_PATH:-$hotfix_product_directory/libHotfixClangPlugin.dylib}"
+manifest_tool="${IR_HOTFIX_TARGET_MANIFEST_TOOL:-$(dirname "$plugin")/HotfixManifestTool}"
+[[ -x "$INSTRUMENTING_CLANG" ]] || fail "Homebrew Clang is missing: $INSTRUMENTING_CLANG"
+[[ -x "$OPT" ]] || fail "Homebrew opt is missing: $OPT"
+[[ -x "$LLC" ]] || fail "Homebrew llc is missing: $LLC"
+[[ -r "$clang_plugin" && -f "$clang_plugin" ]] ||
+  fail "Clang annotation plugin is missing: $clang_plugin"
+if [[ "$patch_mode" != "1" ]]; then
+  [[ -r "$plugin" && -f "$plugin" ]] || fail "LLVM pass plugin is missing: $plugin"
+  [[ -x "$manifest_tool" ]] || fail "Manifest tool is missing: $manifest_tool"
+fi
+
+output_directory="$(dirname "$output_file")"
+[[ -d "$output_directory" && -w "$output_directory" ]] ||
+  fail "object output directory is not writable: $output_directory"
+
+temp="$(mktemp -d "${TMPDIR:-/tmp}/clang-hotfix.XXXXXX")"
+atomic_object=""
+atomic_manifest=""
+atomic_patch_directory=""
+cleanup() {
+  find "$temp" -type f -delete
+  find "$temp" -depth -type d -empty -delete
+  if [[ -n "$atomic_object" && -e "$atomic_object" ]]; then
+    find "$atomic_object" -delete
+  fi
+  if [[ -n "$atomic_manifest" && -e "$atomic_manifest" ]]; then
+    find "$atomic_manifest" -delete
+  fi
+  if [[ -n "$atomic_patch_directory" && -d "$atomic_patch_directory" ]]; then
+    find "$atomic_patch_directory" -type f -delete
+    find "$atomic_patch_directory" -depth -type d -empty -delete
+  fi
+}
+trap cleanup EXIT
+
+bitcode_arguments=()
+for ((index = 0; index < ${#arguments[@]}; ++index)); do
+  argument="${arguments[index]}"
+  case "$argument" in
+    -o)
+      ((++index))
+      ;;
+    -index-store-path)
+      ((++index))
+      ;;
+    -fprofile-instr-generate | -fprofile-instr-generate=* | -fcoverage-mapping)
+      if [[ "$patch_mode" != "1" ]]; then
+        bitcode_arguments+=("$argument")
+      fi
+      ;;
+    -fembed-bitcode | -fembed-bitcode-marker | -flto | -flto=*)
+      ;;
+    *)
+      bitcode_arguments+=("$argument")
+      ;;
+  esac
+done
+
+"$INSTRUMENTING_CLANG" \
+  "${bitcode_arguments[@]}" \
+  -emit-llvm \
+  -o "$temp/input.bc" \
+  -Xclang -load \
+  -Xclang "$clang_plugin" \
+  -Xclang -add-plugin \
+  -Xclang ir-hotfix-native-descriptor \
+  -Xclang -plugin-arg-ir-hotfix-native-descriptor \
+  -Xclang "$temp/native-targets.txt"
+[[ -r "$temp/input.bc" ]] || fail "Clang did not emit LLVM bitcode"
+[[ -r "$temp/native-targets.txt" ]] ||
+  fail "Clang annotation plugin did not emit target metadata"
+
+if [[ "$patch_mode" == "1" ]]; then
+  baseline_manifest="${IR_HOTFIX_BASELINE_MANIFEST:-}"
+  patch_tool="${IR_HOTFIX_PATCH_TOOL:-$(dirname "$plugin")/HotfixPatchTool}"
+  [[ -r "$baseline_manifest" && -f "$baseline_manifest" ]] ||
+    fail "patch mode baseline Manifest is not readable: $baseline_manifest"
+  [[ -x "$patch_tool" ]] || fail "Patch tool is missing: $patch_tool"
+
+  atomic_patch_directory="$(
+    mktemp -d "$output_directory/.$(basename "$output_file").hotfix-patches.XXXXXX"
+  )"
+  "$patch_tool" extract-native-annotated \
+    "$baseline_manifest" \
+    "$temp/input.bc" \
+    "$atomic_patch_directory"
+
+  atomic_object="$(mktemp "$output_directory/.$(basename "$output_file").hotfix.XXXXXX")"
+  "$LLC" \
+    -filetype=obj \
+    -"$optimization" \
+    -relocation-model=pic \
+    "$temp/input.bc" \
+    -o "$atomic_object"
+  mv -f "$atomic_object" "$output_file"
+  atomic_object=""
+
+  patch_sidecar="$output_file.hotfix-patches"
+  if [[ -d "$patch_sidecar" ]]; then
+    find "$patch_sidecar" -type f -delete
+    find "$patch_sidecar" -depth -type d -empty -delete
+  fi
+  mv -f "$atomic_patch_directory" "$patch_sidecar"
+  atomic_patch_directory=""
+  if [[ -f "$output_file.hotfix-targets.json" ]]; then
+    find "$output_file.hotfix-targets.json" -delete
+  fi
+  exit 0
+fi
+
+IR_HOTFIX_NATIVE_TARGET_MANIFEST="$temp/native-targets.txt" \
+  "$OPT" \
+    -load-pass-plugin "$plugin" \
+    -passes=hotfix-instrument \
+    -verify-each \
+    "$temp/input.bc" \
+    -o "$temp/transformed.bc"
+
+atomic_manifest="$(
+  mktemp "$output_directory/.$(basename "$output_file").hotfix-targets.XXXXXX"
+)"
+"$manifest_tool" extract "$atomic_manifest" "$temp/transformed.bc"
+
+atomic_object="$(mktemp "$output_directory/.$(basename "$output_file").hotfix.XXXXXX")"
+"$LLC" \
+  -filetype=obj \
+  -"$optimization" \
+  -relocation-model=pic \
+  "$temp/transformed.bc" \
+  -o "$atomic_object"
+
+mv -f "$atomic_object" "$output_file"
+atomic_object=""
+mv -f "$atomic_manifest" "$output_file.hotfix-targets.json"
+atomic_manifest=""

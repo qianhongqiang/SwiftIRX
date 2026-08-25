@@ -7,6 +7,11 @@ find_package(
   PATHS /opt/homebrew/opt/llvm@19/lib/cmake/llvm
   NO_DEFAULT_PATH
 )
+find_package(
+  Clang 19.1.7 EXACT REQUIRED CONFIG
+  PATHS /opt/homebrew/opt/llvm@19/lib/cmake/clang
+  NO_DEFAULT_PATH
+)
 
 add_definitions(${LLVM_DEFINITIONS})
 
@@ -17,6 +22,11 @@ target_include_directories(
   HotfixPass
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../SDK/IRHotfixSDK/ABI"
 )
+
+add_library(HotfixClangPlugin MODULE Sources/HotfixClangPlugin.cpp)
+target_compile_features(HotfixClangPlugin PRIVATE cxx_std_20)
+target_include_directories(HotfixClangPlugin SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_link_libraries(HotfixClangPlugin PRIVATE clang-cpp)
 
 add_executable(HotfixManifestTool Sources/HotfixManifestTool.cpp)
 target_compile_features(HotfixManifestTool PRIVATE cxx_std_20)
@@ -121,6 +131,14 @@ set_target_properties(
 )
 
 set_target_properties(
+  HotfixClangPlugin
+  PROPERTIES
+    PREFIX "lib"
+    SUFFIX ".dylib"
+    LIBRARY_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
+)
+
+set_target_properties(
   HotfixManifestTool
   PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${HOTFIX_PASS_OUTPUT_DIRECTORY}"
@@ -160,4 +178,5 @@ endif()
 
 if(APPLE)
   target_link_options(HotfixPass PRIVATE "LINKER:-undefined,dynamic_lookup")
+  target_link_options(HotfixClangPlugin PRIVATE "LINKER:-undefined,dynamic_lookup")
 endif()

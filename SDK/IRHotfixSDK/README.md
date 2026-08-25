@@ -175,7 +175,8 @@ returns `HFStatusExecutionCommitted` and cannot fall back to the original body.
 ## Target Manifest
 
 Debug and Release instrumentation generate one descriptor-derived sidecar
-manifest for each Swift object. After the target's Sources phase, Xcode merges those files
+manifest for each Swift or annotated C/C++ object. After the target's Sources
+phase, Xcode merges those files
 into `HotfixTargetManifest.json` in the app bundle. The JSON root contains
 `schemaVersion`, `abiVersion`, and a deterministic symbol-sorted `targets`
 array. Each target records:
@@ -248,12 +249,15 @@ defer { HotfixManager.shared.deactivate(activation) }
 signature mismatches, verifier failures, traps before host effects, unsupported
 host types, and off-main-thread Objective-C preflight preserve native fallback.
 
-C functions and non-virtual C++ instance methods use
-`hf_native_patch_invoke`. C++ `this` is registered as a borrowed,
-generation-checked native handle for one synchronous invocation; it is never
-reinterpreted as an Objective-C object. Patch source is compiled with
-`Tools/HotfixPass/clang-patch-build` and then lowered to the same `.hfpatch`
-container and Target ABI Schema as Swift.
+C functions and non-virtual C++ instance methods include
+`Runtime/HotfixNativeTarget.h` and add `IR_HOTFIX_TARGET` to the declaration.
+The C-family compiler wrapper validates the source ABI and automatically emits
+the fallback clone, VM trampoline, and Target Manifest descriptor. C++ `this`
+is registered as a borrowed, generation-checked native handle for one
+synchronous invocation; it is never reinterpreted as an Objective-C object.
+Patch branches edit the same annotated body and are lowered by `build-patches`,
+or by `Tools/HotfixPass/clang-patch-build` for one standalone source, to the
+same `.hfpatch` container and Target ABI Schema as Swift.
 
 `@HotfixPatch` is intentionally available only while `build-patches` sets
 `IR_HOTFIX_PATCH_BUILD`. The first version accepts non-generic, synchronous,

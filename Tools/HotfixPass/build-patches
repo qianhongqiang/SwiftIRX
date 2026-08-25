@@ -120,5 +120,6 @@ done < <(
     -print0
 )
 
-((patch_count > 0)) || fail "build contained no @HotfixPatch functions"
+((patch_count > 0)) ||
+  fail "build contained no @HotfixPatch or IR_HOTFIX_TARGET changes"
 echo "[HotfixPatchBuild] wrote $patch_count Patch artifact(s) to $output_directory"

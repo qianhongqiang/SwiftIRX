@@ -6,7 +6,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -34,6 +36,7 @@ namespace {
 constexpr uint32_t ManifestSchemaVersion = 1;
 constexpr StringLiteral PatchEntryName = "__ir_hotfix_patch_entry";
 constexpr StringLiteral SourcePatchEntryName = "hotfixPatch";
+constexpr StringLiteral NativeTargetAnnotation = "ir_hotfix_target";
 
 struct Target {
   std::string symbol;
@@ -510,6 +513,59 @@ Function *findSourcePatchEntry(Module &module, std::string &error) {
   return candidate;
 }
 
+std::vector<Function *> findAnnotatedNativeTargets(Module &module) {
+  std::vector<Function *> targets;
+  GlobalVariable *annotations = module.getGlobalVariable(
+      "llvm.global.annotations", true);
+  const auto *array = annotations == nullptr
+                          ? nullptr
+                          : dyn_cast_or_null<ConstantArray>(
+                                annotations->getInitializer());
+  if (array == nullptr)
+    return targets;
+
+  std::set<Function *> uniqueTargets;
+  for (const Use &element : array->operands()) {
+    const auto *annotation = dyn_cast<ConstantStruct>(element.get());
+    if (annotation == nullptr || annotation->getNumOperands() < 2)
+      continue;
+    auto *function = dyn_cast<Function>(
+        annotation->getOperand(0)->stripPointerCasts());
+    const auto *textGlobal = dyn_cast<GlobalVariable>(
+        annotation->getOperand(1)->stripPointerCasts());
+    const auto *text = textGlobal == nullptr
+                           ? nullptr
+                           : dyn_cast_or_null<ConstantDataSequential>(
+                                 textGlobal->getInitializer());
+    if (function == nullptr || function->isDeclaration() || text == nullptr ||
+        !text->isCString() || text->getAsCString() != NativeTargetAnnotation ||
+        !uniqueTargets.insert(function).second)
+      continue;
+    targets.push_back(function);
+  }
+  llvm::sort(targets, [](const Function *left, const Function *right) {
+    return left->getName() < right->getName();
+  });
+  return targets;
+}
+
+bool prepareAnnotatedPatch(Module &module, Function &entry,
+                           const Target &target, StringRef outputPath,
+                           std::string &error) {
+  if (entry.getName() != target.symbol) {
+    error = "annotated native function '" + entry.getName().str() +
+            "' is not the exact baseline Manifest target '" + target.symbol +
+            "'";
+    return false;
+  }
+  if (!validateEntry(entry, target, error) ||
+      !lowerCheckedIntegerArithmetic(entry, error))
+    return false;
+  if (outputPath.contains(".hfpatch"))
+    return writeHFPatch(module, entry, target, outputPath, error);
+  return writePatch(entry, outputPath, error);
+}
+
 bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
                 StringRef outputPath, std::string &error) {
   Target target;
@@ -530,8 +586,22 @@ bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
   }
 
   Function *entry = findSourcePatchEntry(*module, error);
-  if (entry == nullptr)
-    return false;
+  if (entry == nullptr) {
+    error.clear();
+    for (Function *annotated : findAnnotatedNativeTargets(*module)) {
+      if (annotated->getName() == target.symbol) {
+        entry = annotated;
+        break;
+      }
+    }
+    if (entry == nullptr) {
+      error = "patch source must define hotfixPatch or annotate the exact "
+              "baseline target '" +
+              target.symbol + "'";
+      return false;
+    }
+    return prepareAnnotatedPatch(*module, *entry, target, outputPath, error);
+  }
   if (!validateEntry(*entry, target, error))
     return false;
   if (!lowerCheckedIntegerArithmetic(*entry, error))
@@ -546,6 +616,89 @@ bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
   if (outputPath.contains(".hfpatch"))
     return writeHFPatch(*module, *entry, target, outputPath, error);
   return writePatch(*entry, outputPath, error);
+}
+
+bool buildSingleAnnotatedPatch(StringRef manifestPath, StringRef inputPath,
+                               StringRef outputPath, std::string &error) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  std::unique_ptr<Module> module = parseIRFile(inputPath, diagnostic, context);
+  if (module == nullptr) {
+    std::string message;
+    raw_string_ostream stream(message);
+    diagnostic.print("HotfixPatchTool", stream);
+    stream.flush();
+    error = "cannot read patch LLVM module '" + inputPath.str() + "': " +
+            message;
+    return false;
+  }
+
+  std::vector<Function *> targets = findAnnotatedNativeTargets(*module);
+  if (targets.size() != 1) {
+    error = "annotation patch source must define exactly one "
+            "IR_HOTFIX_TARGET; found " +
+            std::to_string(targets.size());
+    return false;
+  }
+  Target target;
+  if (!loadTarget(manifestPath, targets.front()->getName(), target, error))
+    return false;
+  return prepareAnnotatedPatch(*module, *targets.front(), target, outputPath,
+                               error);
+}
+
+bool extractNativeAnnotatedPatches(StringRef manifestPath, StringRef inputPath,
+                                   StringRef outputDirectory,
+                                   std::string &error) {
+  LLVMContext context;
+  SMDiagnostic diagnostic;
+  std::unique_ptr<Module> module = parseIRFile(inputPath, diagnostic, context);
+  if (module == nullptr) {
+    std::string message;
+    raw_string_ostream stream(message);
+    diagnostic.print("HotfixPatchTool", stream);
+    stream.flush();
+    error = "cannot read native patch LLVM module '" + inputPath.str() +
+            "': " + message;
+    return false;
+  }
+
+  std::error_code directoryError = sys::fs::create_directories(outputDirectory);
+  if (directoryError) {
+    error = "cannot create patch output directory '" +
+            outputDirectory.str() + "': " + directoryError.message();
+    return false;
+  }
+
+  std::set<uint64_t> extractedTargetIDs;
+  for (Function *entry : findAnnotatedNativeTargets(*module)) {
+    Target target;
+    if (!loadTarget(manifestPath, entry->getName(), target, error))
+      return false;
+    if (!extractedTargetIDs.insert(target.targetID).second) {
+      error = "multiple IR_HOTFIX_TARGET annotations resolve to target '" +
+              target.symbol + "'";
+      return false;
+    }
+    if (!validateEntry(*entry, target, error) ||
+        !lowerCheckedIntegerArithmetic(*entry, error))
+      return false;
+
+    SmallString<256> textPath(outputDirectory);
+    sys::path::append(textPath,
+                      "0x" + utohexstr(target.targetID, true, 16) +
+                          ".irpatch");
+    if (!writePatch(*entry, textPath, error))
+      return false;
+
+    SmallString<256> packagePath(outputDirectory);
+    sys::path::append(packagePath,
+                      "0x" + utohexstr(target.targetID, true, 16) +
+                          ".hfpatch");
+    if (!writeHFPatch(*module, *entry, target, packagePath, error))
+      return false;
+  }
+  return true;
 }
 
 bool lowerHFPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
@@ -678,6 +831,18 @@ int main(int argc, char **argv) {
       return fail(error);
     return 0;
   }
+  if (argc == 5 && StringRef(argv[1]) == "build-native-annotated") {
+    std::string error;
+    if (!buildSingleAnnotatedPatch(argv[2], argv[3], argv[4], error))
+      return fail(error);
+    return 0;
+  }
+  if (argc == 5 && StringRef(argv[1]) == "extract-native-annotated") {
+    std::string error;
+    if (!extractNativeAnnotatedPatches(argv[2], argv[3], argv[4], error))
+      return fail(error);
+    return 0;
+  }
   if (argc == 6 && StringRef(argv[1]) == "lower-hfir") {
     std::string error;
     if (!lowerHFPatch(argv[2], argv[3], argv[4], argv[5], error))
@@ -689,6 +854,11 @@ int main(int argc, char **argv) {
                 "<swift.bc|swift.ll> <output.irpatch|output.hfpatch>\n"
                 "       HotfixPatchTool extract-annotated <manifest.json> "
                 "<swift.bc|swift.ll> <output-directory>\n"
+                "       HotfixPatchTool build-native-annotated "
+                "<manifest.json> <clang.bc|clang.ll> "
+                "<output.irpatch|output.hfpatch>\n"
+                "       HotfixPatchTool extract-native-annotated "
+                "<manifest.json> <clang.bc|clang.ll> <output-directory>\n"
                 "       HotfixPatchTool lower-hfir <manifest.json> "
                 "<target-query> <input.irpatch|swift.ll> <output.hfpatch>");
   }

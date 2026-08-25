@@ -263,7 +263,9 @@
 			inputPaths = (
 				"$(SRCROOT)/Tools/HotfixPass/CMakeLists.txt",
 				"$(SRCROOT)/Tools/HotfixPass/build-hotfix-toolchain",
+				"$(SRCROOT)/Tools/HotfixPass/clang-hotfix",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixAdapterTool.cpp",
+				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixClangPlugin.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixManifestTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPatchTool.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/Sources/HotfixPackageTool.cpp",
@@ -276,12 +278,14 @@
 				"$(SRCROOT)/SDK/IRHotfixSDK/Format/HFPatchContainer.cpp",
 				"$(SRCROOT)/Tools/HotfixPass/generate-class-receiver-manifest.sh",
 				"$(SRCROOT)/Tools/HotfixPass/swiftc-hotfix",
+				"$(SRCROOT)/SDK/IRHotfixSDK/Runtime/HotfixNativeTarget.h",
 				"$(SRCROOT)/HotfixConfig/HotfixHostAdapters.json",
 				"$(SRCROOT)/SDK/IRHotfixSDK/HostAdapter/HFGeneratedHostAdapters.h",
 			);
 			name = "Build Hotfix Pass";
 			outputPaths = (
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/libHotfixPass.dylib",
+				"$(DERIVED_FILE_DIR)/HotfixPassProduct/libHotfixClangPlugin.dylib",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixAdapterTool",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixManifestTool",
 				"$(DERIVED_FILE_DIR)/HotfixPassProduct/HotfixPatchTool",
@@ -355,8 +359,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CC = "$(SRCROOT)/Tools/HotfixPass/clang-hotfix";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				CPLUSPLUS = "$(SRCROOT)/Tools/HotfixPass/clang-hotfix";
 				DEVELOPMENT_TEAM = 9R58G3D4PK;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -394,8 +400,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CC = "$(SRCROOT)/Tools/HotfixPass/clang-hotfix";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				CPLUSPLUS = "$(SRCROOT)/Tools/HotfixPass/clang-hotfix";
 				DEVELOPMENT_TEAM = 9R58G3D4PK;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;

@@ -12,7 +12,7 @@ fail() {
 }
 
 usage() {
-  echo "usage: clang-patch-build --language c|cxx --manifest <HotfixTargetManifest.json> --target <query> --source <Patch.c|Patch.cpp> --output <Patch.irpatch|Patch.hfpatch> [--sdk iphonesimulator|iphoneos] [--arch arm64] [--deployment-target 26.2]" >&2
+  echo "usage: clang-patch-build --language c|cxx --manifest <HotfixTargetManifest.json> [--target <query>] --source <Patch.c|Patch.cpp> --output <Patch.irpatch|Patch.hfpatch> [--sdk iphonesimulator|iphoneos] [--arch arm64] [--deployment-target 26.2]" >&2
   exit 64
 }
 
@@ -49,7 +49,7 @@ while (($# > 0)); do
 done
 
 [[ "$language" == "c" || "$language" == "cxx" ]] || usage
-[[ -n "$manifest" && -n "$target_query" && -n "$source_file" && -n "$output_file" ]] || usage
+[[ -n "$manifest" && -n "$source_file" && -n "$output_file" ]] || usage
 [[ -r "$manifest" && -f "$manifest" ]] || fail "manifest is not readable: $manifest"
 [[ -r "$source_file" && -f "$source_file" ]] || fail "patch source is not readable: $source_file"
 [[ "$sdk_name" == "iphonesimulator" || "$sdk_name" == "iphoneos" ]] ||
@@ -109,11 +109,18 @@ output_directory="$(dirname "$output_file")"
 [[ -d "$output_directory" && -w "$output_directory" ]] ||
   fail "patch output directory is not writable: $output_directory"
 atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").XXXXXX")"
-"$PATCH_TOOL" build \
-  "$manifest" \
-  "$target_query" \
-  "$temp/Patch.bc" \
-  "$atomic_output"
+if [[ -n "$target_query" ]]; then
+  "$PATCH_TOOL" build \
+    "$manifest" \
+    "$target_query" \
+    "$temp/Patch.bc" \
+    "$atomic_output"
+else
+  "$PATCH_TOOL" build-native-annotated \
+    "$manifest" \
+    "$temp/Patch.bc" \
+    "$atomic_output"
+fi
 mv -f "$atomic_output" "$output_file"
 atomic_output=""
 

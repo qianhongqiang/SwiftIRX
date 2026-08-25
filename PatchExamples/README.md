@@ -17,7 +17,8 @@ baseline，可用于重新生成随 App 打包的演示产物。真实发布流�
 - `HotfixCXX.hfpatch`
 
 Swift examples use `swift-patch-build`. The C and C++ examples use
-`clang-patch-build`; C++ is currently limited to non-virtual instance targets
-whose `this` pointer is carried as a scoped native handle.
+`clang-patch-build` and keep `IR_HOTFIX_TARGET` on the original release symbol,
+so `--target` is optional. C++ is limited to non-virtual instance targets whose
+`this` pointer is carried as a scoped native handle.
 
 没有同名产物时，页面仍可运行发布版实现，并明确显示缺少的 Patch 文件。

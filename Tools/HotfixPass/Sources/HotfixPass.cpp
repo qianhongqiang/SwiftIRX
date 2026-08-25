@@ -1,5 +1,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Attributes.h"
@@ -33,15 +34,19 @@ constexpr StringLiteral OriginalSuffix = ".hotfix_original";
 constexpr StringLiteral DescriptorSection = "__DATA,__hotfix";
 constexpr StringLiteral ReceiverManifestEnvironment =
     "IR_HOTFIX_CLASS_RECEIVER_MANIFEST";
+constexpr StringLiteral NativeManifestEnvironment =
+    "IR_HOTFIX_NATIVE_TARGET_MANIFEST";
 constexpr unsigned MaximumScalarArgumentCount =
     HF_MAX_SCALAR_ARGUMENT_COUNT;
 
 enum class FunctionClassification { NotCandidate, Eligible, Skipped };
+enum class ReceiverKind { None, Object, Native };
 
 struct FunctionShape {
   FunctionClassification classification = FunctionClassification::NotCandidate;
   StringRef skipReason;
   Argument *receiver = nullptr;
+  ReceiverKind receiverKind = ReceiverKind::None;
   SmallVector<Argument *> scalarArguments;
 };
 
@@ -108,11 +113,51 @@ StringSet<> loadClassReceiverManifest() {
   return receiverSymbols;
 }
 
+StringMap<ReceiverKind> loadNativeTargetManifest() {
+  StringMap<ReceiverKind> targets;
+  const char *manifestPath = std::getenv(NativeManifestEnvironment.data());
+  if (manifestPath == nullptr)
+    return targets;
+
+  auto manifest = MemoryBuffer::getFile(manifestPath);
+  if (!manifest)
+    report_fatal_error(Twine("[HotfixPass] error: cannot read native target "
+                             "manifest '") +
+                           manifestPath + "': " +
+                           manifest.getError().message(),
+                       false);
+
+  SmallVector<StringRef> lines;
+  manifest.get()->getBuffer().split(lines, '\n', -1, false);
+  for (StringRef line : lines) {
+    line.consume_back("\r");
+    if (line.empty())
+      continue;
+    auto [symbol, kindName] = line.split('\t');
+    ReceiverKind kind;
+    if (symbol.empty() || (kindName != "none" && kindName != "native")) {
+      report_fatal_error(Twine("[HotfixPass] error: malformed native target "
+                               "manifest line: ") +
+                             line,
+                         false);
+    }
+    kind = kindName == "native" ? ReceiverKind::Native : ReceiverKind::None;
+    auto [iterator, inserted] = targets.try_emplace(symbol, kind);
+    if (!inserted && iterator->second != kind) {
+      report_fatal_error(Twine("[HotfixPass] error: conflicting native target "
+                               "metadata for '") +
+                             symbol + "'",
+                         false);
+    }
+  }
+  return targets;
+}
+
 FunctionShape classifyFunction(Function &function,
-                               const StringSet<> &receiverSymbols) {
+                               const StringSet<> &receiverSymbols,
+                               const StringMap<ReceiverKind> &nativeTargets) {
   FunctionShape shape;
-  if (function.empty() || function.isIntrinsic() ||
-      function.getCallingConv() != CallingConv::Swift)
+  if (function.empty() || function.isIntrinsic())
     return shape;
 
   StringRef name = function.getName();
@@ -120,7 +165,16 @@ FunctionShape classifyFunction(Function &function,
       name.ends_with(OriginalSuffix))
     return shape;
 
+  const auto nativeTarget = nativeTargets.find(name);
+  const bool isSwift = function.getCallingConv() == CallingConv::Swift;
+  if (!isSwift && nativeTarget == nativeTargets.end())
+    return shape;
+
   shape.classification = FunctionClassification::Skipped;
+  if (!isSwift && function.getCallingConv() != CallingConv::C) {
+    shape.skipReason = "unsupported native calling convention";
+    return shape;
+  }
   if (function.isVarArg()) {
     shape.skipReason = "variadic function";
     return shape;
@@ -131,9 +185,18 @@ FunctionShape classifyFunction(Function &function,
     shape.skipReason = "unsupported return type";
     return shape;
   }
+  if (!isSwift && nativeTarget->second == ReceiverKind::Native) {
+    if (function.arg_empty() ||
+        !function.arg_begin()->getType()->isPointerTy()) {
+      shape.skipReason = "native C++ method has no pointer receiver";
+      return shape;
+    }
+    shape.receiver = function.arg_begin();
+    shape.receiverKind = ReceiverKind::Native;
+  }
 
   for (Argument &argument : function.args()) {
-    if (argument.hasAttribute(Attribute::SwiftSelf)) {
+    if (isSwift && argument.hasAttribute(Attribute::SwiftSelf)) {
       if (!argument.getType()->isPointerTy()) {
         shape.skipReason = "malformed swiftself receiver argument";
         return shape;
@@ -143,6 +206,10 @@ FunctionShape classifyFunction(Function &function,
         return shape;
       }
       shape.receiver = &argument;
+      shape.receiverKind = ReceiverKind::Object;
+      continue;
+    }
+    if (&argument == shape.receiver) {
       continue;
     }
 
@@ -161,7 +228,7 @@ FunctionShape classifyFunction(Function &function,
     }
   }
 
-  if (shape.receiver != nullptr &&
+  if (isSwift && shape.receiver != nullptr &&
       !receiverSymbols.contains(function.getName())) {
     shape.skipReason = "unverified swiftself receiver";
     return shape;
@@ -311,7 +378,8 @@ Function *cloneOriginal(Function &function) {
   return clone;
 }
 
-void prepareTrampolineAttributes(Function &function) {
+void prepareTrampolineAttributes(Function &function,
+                                 const FunctionShape &shape) {
   constexpr Attribute::AttrKind invalidBehavior[] = {
       Attribute::AllocKind,    Attribute::AllocSize,  Attribute::Memory,
       Attribute::MustProgress, Attribute::Naked,      Attribute::NoCallback,
@@ -325,7 +393,7 @@ void prepareTrampolineAttributes(Function &function) {
   function.removeRetAttr(Attribute::Range);
   for (Argument &argument : function.args()) {
     argument.removeAttr(Attribute::Returned);
-    if (argument.hasAttribute(Attribute::SwiftSelf)) {
+    if (&argument == shape.receiver) {
       argument.removeAttr(Attribute::NoCapture);
       argument.removeAttr(Attribute::ReadNone);
       argument.removeAttr(Attribute::ReadOnly);
@@ -397,9 +465,13 @@ GlobalVariable *createDescriptor(Function &function, const FunctionShape &shape,
       ConstantInt::get(i64, signatureID),
       ConstantInt::get(i32, returnKind(function.getReturnType())),
       ConstantInt::get(i32, shape.scalarArguments.size()),
-      ConstantInt::get(i32, shape.receiver == nullptr
-                                ? HFDescriptorFlagNone
-                                : HFDescriptorFlagHasReceiver),
+      ConstantInt::get(
+          i32, shape.receiver == nullptr
+                   ? HFDescriptorFlagNone
+                   : (HFDescriptorFlagHasReceiver |
+                      (shape.receiverKind == ReceiverKind::Native
+                           ? HFDescriptorFlagNativeReceiver
+                           : HFDescriptorFlagNone))),
       ConstantInt::get(i32, 0),
       name,
       kindsPointer,
@@ -434,7 +506,7 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
   function.deleteBody();
   function.setLinkage(originalLinkage);
   function.setDSOLocal(originalDSOLocal);
-  prepareTrampolineAttributes(function);
+  prepareTrampolineAttributes(function, shape);
 
   BasicBlock *entry = BasicBlock::Create(context, "entry", &function);
   BasicBlock *patched =
@@ -549,7 +621,11 @@ InstrumentedFunction instrument(Function &function, const FunctionShape &shape,
     receiverHandle->setAlignment(Align(8));
     builder.CreateCall(
         handleScopeBegin,
-        {shape.receiver, builder.getInt16(HFHandleKindObject), receiverHandle},
+        {shape.receiver,
+         builder.getInt16(shape.receiverKind == ReceiverKind::Native
+                              ? HFHandleKindNativeSymbol
+                              : HFHandleKindObject),
+         receiverHandle},
         "hotfix.receiver.scope_status");
     LoadInst *loadedHandle = builder.CreateLoad(
         handleType, receiverHandle, "hotfix.receiver.scoped_handle");
@@ -666,6 +742,7 @@ public:
       return PreservedAnalyses::all();
 
     StringSet<> receiverSymbols = loadClassReceiverManifest();
+    StringMap<ReceiverKind> nativeTargets = loadNativeTargetManifest();
     module.addModuleFlag(Module::Warning, InstrumentedModuleFlag, 1);
     addLoadMarker(module);
 
@@ -675,7 +752,8 @@ public:
     };
     SmallVector<EligibleFunction> eligibleFunctions;
     for (Function &function : module) {
-      FunctionShape shape = classifyFunction(function, receiverSymbols);
+      FunctionShape shape =
+          classifyFunction(function, receiverSymbols, nativeTargets);
       std::string cloneName = (function.getName() + OriginalSuffix).str();
       if (shape.classification == FunctionClassification::Eligible &&
           module.getFunction(cloneName) == nullptr) {

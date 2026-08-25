@@ -193,13 +193,15 @@ enum HotfixExampleCatalog {
                     tintName: "orange",
                     patchResource: "HotfixC",
                     releaseSource: """
+                    IR_HOTFIX_TARGET
                     int64_t hotfix_example_c_add(int64_t value) {
-                        // 通用 trampoline，未命中 Patch 时回退。
+                        // 编译器自动生成 trampoline 和 fallback clone。
                         return value + 2;
                     }
                     """,
                     patchSource: """
-                    int64_t hotfixPatch(int64_t value) {
+                    IR_HOTFIX_TARGET
+                    int64_t hotfix_example_c_add(int64_t value) {
                         return value + 200;
                     }
                     """,
@@ -216,8 +218,9 @@ enum HotfixExampleCatalog {
                     releaseSource: """
                     class HFCalculator final {
                     public:
+                        IR_HOTFIX_TARGET
                         long long multiply(long long value) {
-                            // this 作为 native scoped handle 传入 VM。
+                            // 编译器把 this 作为 native scoped handle 传入 VM。
                             return value * 2;
                         }
                     };
@@ -228,8 +231,13 @@ enum HotfixExampleCatalog {
                         return value * 5;
                     }
 
-                    long long hotfixPatch(void *receiver, long long value) {
-                        (void)receiver;
+                    class HFCalculator final {
+                    public:
+                        IR_HOTFIX_TARGET
+                        long long multiply(long long value);
+                    };
+
+                    long long HFCalculator::multiply(long long value) {
                         return patchedMultiply(value);
                     }
                     """,

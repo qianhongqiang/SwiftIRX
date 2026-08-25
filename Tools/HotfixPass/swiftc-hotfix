@@ -24,6 +24,23 @@ fail() {
   exit 1
 }
 
+source_has_hotfix_patch_attribute() {
+  awk '
+    {
+      line = $0
+      triple_quote_count = gsub(/"""/, "", line)
+      if (!in_multiline_string &&
+          line ~ /^[[:space:]]*@HotfixPatch([[:space:](]|$)/) {
+        found = 1
+      }
+      if (triple_quote_count % 2 == 1) {
+        in_multiline_string = !in_multiline_string
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
 contains_argument() {
   local expected="$1"
   shift
@@ -395,7 +412,7 @@ if [[ "$patch_mode" == "1" ]]; then
     "$baseline_manifest" \
     "$temp/input.bc" \
     "$atomic_patch_directory"
-  if grep -Eq '@HotfixPatch([[:space:](]|$)' "$primary_file" &&
+  if source_has_hotfix_patch_attribute "$primary_file" &&
     ! find "$atomic_patch_directory" -type f -name '*.hfpatch' -print -quit |
       grep -q .; then
     fail "@HotfixPatch in $primary_file produced no annotation anchor"

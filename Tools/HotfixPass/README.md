@@ -1,4 +1,4 @@
-# Swift Hotfix Pass Learning Guide
+# Binary HFIR Hotfix Toolchain
 
 This directory contains an out-of-tree LLVM instrumentation experiment for the
 `IR` iOS app. It is useful for studying Swift lowering, LLVM passes, ABI
@@ -36,6 +36,13 @@ Released source branch + edited @HotfixPatch function + released Target Manifest
   -> IRHotfixMacrosPlugin annotation anchors
   -> HotfixPatchTool exact-symbol/ABI validation and HFIR lowering
   -> one 0x<targetID>.hfpatch per annotated function
+
+Annotated C / C++ source
+  -> Homebrew Clang 19 AST validation + LLVM bitcode
+  -> LLVM trampoline and native-receiver lowering
+  -> descriptor-derived per-object Target Manifest
+  -> exact released-symbol/ABI validation in Patch mode
+  -> one binary .hfpatch per IR_HOTFIX_TARGET
 ```
 
 Native direct calls are limited to 16 non-receiver arguments. C++ member calls
@@ -83,6 +90,7 @@ cmake --build Tools/HotfixPass/.cmake-build --config Release
 
 The plugin and host executables are written to
 `Tools/HotfixPass/.build/libHotfixPass.dylib` and
+`Tools/HotfixPass/.build/libHotfixClangPlugin.dylib` and
 `Tools/HotfixPass/.build/HotfixManifestTool` and
 `Tools/HotfixPass/.build/HotfixAdapterTool` and
 `Tools/HotfixPass/.build/HotfixPatchTool` and
@@ -98,6 +106,7 @@ Tools/HotfixPass/Tests/verify-wrapper.sh
 Tools/HotfixPass/Tests/verify-patch-build.sh
 Tools/HotfixPass/Tests/verify-hfpatch-format.sh
 Tools/HotfixPass/Tests/verify-host-adapters.sh
+Tools/HotfixPass/Tests/verify-native-annotations.sh
 ```
 
 `run-pass-tests.sh` checks scalar and receiver classification, deterministic
@@ -111,6 +120,9 @@ exclusion. `verify-patch-build.sh` compiles Swift patch sources and checks targe
 selection, receiver and scalar ABI validation, ambiguous queries, local helper
 rejection, annotation extraction, semantic HFIR lowering, and UIKit/Objective-C
 imports without leaking compiler symbols.
+`verify-native-annotations.sh` checks annotated C/C++ release instrumentation,
+native receiver descriptors, virtual-method rejection, Xcode-style Patch
+sidecars, exact baseline validation, and executable HFIR results.
 `verify-hfpatch-format.sh` checks HFIR semantic rejection, deterministic binary
 round-tripping, optional sections, dump output, corruption detection, and the
 absence of LLVM IR and Swift mangled symbols from the published container.
@@ -437,33 +449,40 @@ changes.
 
 ## C / C++ Patch Compiler
 
-`clang-patch-build` compiles one top-level C or C++ `hotfixPatch` function to
-LLVM bitcode and feeds the same validated HFIR lowerer used by Swift. C targets
-use no receiver. A non-virtual C++ instance-method target uses a first
-`void *receiver` parameter and declares `"receiverKind": "native"` in the
-Target Manifest; the runtime requires a live `HFHandleKindNativeSymbol` rather
-than treating `this` as an object pointer.
+Include `HotfixNativeTarget.h` and place `IR_HOTFIX_TARGET` on a C function or
+non-virtual C++ method declaration. Xcode uses `clang-hotfix` for C-family
+object jobs. A matching-version Clang AST plugin rejects unsupported source
+ABI shapes, writes exact mangled-symbol/receiver metadata, then the LLVM pass
+generates the fallback clone, VM trampoline, and descriptor. C targets have no
+receiver; a C++ instance method uses `receiverKind: native` and a scoped
+`HFHandleKindNativeSymbol`.
+
+On a patch branch, edit the same annotated function body. `build-patches`
+compiles it with the original Xcode flags, requires an exact symbol and Target
+ABI match in the archived release Manifest, and emits target-ID-named
+`.irpatch` and `.hfpatch` sidecars. For a standalone source containing exactly
+one annotation, `clang-patch-build` discovers the target without `--target`:
 
 ```bash
 Tools/HotfixPass/clang-patch-build \
   --language c \
   --manifest PatchExamples/HotfixTargetManifest.json \
-  --target hotfix_example_c_add \
   --source PatchExamples/Sources/HotfixC.c \
   --output IR/Patches/HotfixC.hfpatch
 
 Tools/HotfixPass/clang-patch-build \
   --language cxx \
   --manifest PatchExamples/HotfixTargetManifest.json \
-  --target HFCalculator \
   --source PatchExamples/Sources/HotfixCXX.cpp \
   --output IR/Patches/HotfixCXX.hfpatch
 ```
 
-The first C/C++ subset supports scalar/Bool/Float/Double signatures, branches,
-loops and directly reachable local helpers. It deliberately excludes virtual
-dispatch, exceptions, RTTI, templates or STL values at the target boundary,
-and C++ object layout access through the receiver.
+`--target` remains available for the legacy separate `hotfixPatch` entry form.
+The annotated subset supports `void`, 64-bit integers, Bool, Float and Double,
+branches, loops, and directly reachable local helpers. The Clang plugin rejects
+virtual methods, constructors/destructors, templates, variadics, and non-scalar
+target boundaries before code generation. Patch code still cannot dereference
+or depend on the C++ receiver's object layout.
 
 ## Supported Swift Patch language subset
 
