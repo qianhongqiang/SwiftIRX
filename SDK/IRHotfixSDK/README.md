@@ -49,7 +49,7 @@ IRHotfixSDK/
   and Codable Target Manifest model.
 - `Runtime/HotfixPatchAnnotation.swift` declares the build-only
   `@HotfixPatch` marker used to select changed functions on a patch branch.
-- `Format/` defines typed HFIR v2, the deterministic `.hfpatch` v1 container,
+- `Format/` defines typed HFIR v3, the deterministic `.hfpatch` v1 container,
   semantic validation, binary encoding/decoding, and human-readable dumping.
   It is C++20 with no LLVM dependency so the same code runs in host tools and
   the iOS VM.
@@ -247,6 +247,13 @@ defer { HotfixManager.shared.deactivate(activation) }
 `hf_vm_invoke` dispatches only to the active HFIR VM. Malformed frames,
 signature mismatches, verifier failures, traps before host effects, unsupported
 host types, and off-main-thread Objective-C preflight preserve native fallback.
+
+C functions and non-virtual C++ instance methods use
+`hf_native_patch_invoke`. C++ `this` is registered as a borrowed,
+generation-checked native handle for one synchronous invocation; it is never
+reinterpreted as an Objective-C object. Patch source is compiled with
+`Tools/HotfixPass/clang-patch-build` and then lowered to the same `.hfpatch`
+container and Target ABI Schema as Swift.
 
 `@HotfixPatch` is intentionally available only while `build-patches` sets
 `IR_HOTFIX_PATCH_BUILD`. The first version accepts non-generic, synchronous,

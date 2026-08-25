@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace irhotfix;
@@ -20,6 +21,19 @@ void require(bool condition, const std::string &message) {
     failed(message);
 }
 
+void setTarget(hfir::Package &package, std::uint64_t targetID,
+               hfir::TargetValueKind returnType,
+               std::vector<hfir::TargetValueKind> parameterTypes = {},
+               hfir::TargetReceiverKind receiverKind =
+                   hfir::TargetReceiverKind::None) {
+  package.target.targetID = targetID;
+  package.target.entryFunction = 0;
+  package.target.abi.returnType = returnType;
+  package.target.abi.parameterTypes = std::move(parameterTypes);
+  package.target.abi.receiverKind = receiverKind;
+  package.target.signatureID = hfir::targetSignatureID(package.target.abi);
+}
+
 hfir::Package makePackage() {
   using hfir::ConstantKind;
   using hfir::Opcode;
@@ -30,7 +44,8 @@ hfir::Package makePackage() {
   hfir::Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "test.add-ten";
-  package.target = {0x0102030405060708ULL, 0x8877665544332211ULL, 0};
+  setTarget(package, 0x0102030405060708ULL, hfir::TargetValueKind::I64,
+            {hfir::TargetValueKind::I64});
   package.constants = {{ConstantKind::I64, 10, {}}};
 
   hfir::Function function;
@@ -62,7 +77,7 @@ hfir::Package makePhiPackage(bool invalidPredecessor) {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "test.phi";
-  package.target = {3, 4, 0};
+  setTarget(package, 3, TargetValueKind::I64, {TargetValueKind::Bool});
   package.constants = {{ConstantKind::I64, 10, {}},
                        {ConstantKind::I64, 20, {}}};
   Function function;
@@ -121,6 +136,12 @@ int main() {
   require(decoded.patchID == source.patchID, "patch ID did not round-trip");
   require(decoded.target.targetID == source.target.targetID,
           "target ID did not round-trip");
+  require(decoded.target.abi.returnType == source.target.abi.returnType &&
+              decoded.target.abi.parameterTypes ==
+                  source.target.abi.parameterTypes &&
+              decoded.target.abi.receiverKind ==
+                  source.target.abi.receiverKind,
+          "target ABI schema did not round-trip");
   require(decoded.functions.size() == 1 &&
               decoded.functions[0].blocks[0].instructions.size() == 3,
           "function body did not round-trip");
@@ -129,6 +150,32 @@ int main() {
   const std::string text = container::dump(decoded);
   require(text.find("add.i64 %0:i64 %1:i64") != std::string::npos,
           "dump omitted typed arithmetic instruction");
+  require(text.find("target-abi return i64 receiver none arguments (i64)") !=
+              std::string::npos,
+          "dump omitted target ABI schema");
+
+  hfir::Package mismatchedSignature = makePackage();
+  mismatchedSignature.target.signatureID ^= 1;
+  require(!hfir::verify(mismatchedSignature, error) &&
+              error.find("canonical target ABI schema") != std::string::npos,
+          "mismatched target ABI signature was accepted");
+
+  hfir::Package mismatchedReturn = makePackage();
+  mismatchedReturn.target.abi.returnType = hfir::TargetValueKind::Bool;
+  mismatchedReturn.target.signatureID =
+      hfir::targetSignatureID(mismatchedReturn.target.abi);
+  require(!hfir::verify(mismatchedReturn, error) &&
+              error.find("entry function return type") != std::string::npos,
+          "target ABI return mismatch was accepted");
+
+  hfir::Package mismatchedParameters = makePackage();
+  mismatchedParameters.target.abi.parameterTypes.clear();
+  mismatchedParameters.target.signatureID =
+      hfir::targetSignatureID(mismatchedParameters.target.abi);
+  require(!hfir::verify(mismatchedParameters, error) &&
+              error.find("entry function parameter count") !=
+                  std::string::npos,
+          "target ABI parameter mismatch was accepted");
 
   hfir::Package duplicateDefinition = makePackage();
   duplicateDefinition.functions[0].blocks[0].instructions[1].result = 1;

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace irhotfix;
@@ -25,6 +26,19 @@ void require(bool condition, const std::string &message) {
     failed(message);
 }
 
+void setTarget(hfir::Package &package, std::uint64_t targetID,
+               hfir::TargetValueKind returnType,
+               std::vector<hfir::TargetValueKind> parameterTypes = {},
+               hfir::TargetReceiverKind receiverKind =
+                   hfir::TargetReceiverKind::None) {
+  package.target.targetID = targetID;
+  package.target.entryFunction = 0;
+  package.target.abi.returnType = returnType;
+  package.target.abi.parameterTypes = std::move(parameterTypes);
+  package.target.abi.receiverKind = receiverKind;
+  package.target.signatureID = hfir::targetSignatureID(package.target.abi);
+}
+
 std::vector<std::uint8_t> encode(const hfir::Package &package) {
   std::vector<std::uint8_t> bytes;
   std::string error;
@@ -37,7 +51,7 @@ hfir::Package makeArithmeticPackage() {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.add-ten";
-  package.target = {0x1001, 0x2001, 0};
+  setTarget(package, 0x1001, TargetValueKind::I64, {TargetValueKind::I64});
   package.constants = {{ConstantKind::I64, 10, {}}};
 
   Function function;
@@ -67,7 +81,7 @@ hfir::Package makeSwitchPhiPackage() {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.switch-phi";
-  package.target = {0x1010, 0x2010, 0};
+  setTarget(package, 0x1010, TargetValueKind::I64, {TargetValueKind::I64});
   package.constants = {
       {ConstantKind::I64, 0, {}}, {ConstantKind::I64, 1, {}},
       {ConstantKind::I64, 10, {}}, {ConstantKind::I64, 20, {}},
@@ -112,7 +126,7 @@ hfir::Package makeObjCPackage() {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.objc-descriptor";
-  package.target = {0x1002, 0x2002, 0};
+  setTarget(package, 0x1002, TargetValueKind::Void);
   package.imports = {
       {1, HostImportKind::Class, "NSObject", "NSObject", "",
        ValueType::Handle, {}, false},
@@ -162,7 +176,7 @@ hfir::Package makeNativeCPackage(const char *symbol) {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.native-c";
-  package.target = {0x1003, 0x2003, 0};
+  setTarget(package, 0x1003, TargetValueKind::I64, {TargetValueKind::I64});
   package.imports = {{
       hf_host_call_id(symbol), HostImportKind::NativeC, "", symbol, "",
       ValueType::I64, {ValueType::I64}, false,
@@ -192,7 +206,7 @@ hfir::Package makeNativeNullPackage(const char *symbol) {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.native-null";
-  package.target = {0x1004, 0x2004, 0};
+  setTarget(package, 0x1004, TargetValueKind::Bool);
   package.constants = {{ConstantKind::NullHandle, 0, {}}};
   package.imports = {{
       hf_host_call_id(symbol), HostImportKind::NativeC, "", symbol, "",
@@ -227,7 +241,7 @@ hfir::Package makeNativeNullArgumentPackage(const char *symbol) {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.native-null-argument";
-  package.target = {0x1005, 0x2005, 0};
+  setTarget(package, 0x1005, TargetValueKind::Bool);
   package.constants = {{ConstantKind::NullHandle, 0, {}}};
   package.imports = {{
       hf_host_call_id(symbol), HostImportKind::NativeC, "", symbol, "",
@@ -260,7 +274,7 @@ hfir::Package makeNativePreflightPackage(const char *sideEffectSymbol,
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.native-preflight";
-  package.target = {0x1006, 0x2006, 0};
+  setTarget(package, 0x1006, TargetValueKind::Void);
   package.imports = {
       {hf_host_call_id(sideEffectSymbol), HostImportKind::NativeC, "",
        sideEffectSymbol, "", ValueType::Void, {}, false},
@@ -290,7 +304,7 @@ hfir::Package makeNativeCommittedFailurePackage(const char *sideEffectSymbol) {
   Package package;
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "vm.native-committed-failure";
-  package.target = {0x1007, 0x2007, 0};
+  setTarget(package, 0x1007, TargetValueKind::Void);
   package.constants = {
       {ConstantKind::I64, 1, {}},
       {ConstantKind::I64, 0, {}},
@@ -318,6 +332,55 @@ hfir::Package makeNativeCommittedFailurePackage(const char *sideEffectSymbol) {
             {OperandKind::Register, ValueType::I64, 1}}},
           {Opcode::Return, kNoRegister, ValueType::Void, {}},
       },
+  }};
+  package.functions = {std::move(function)};
+  return package;
+}
+
+hfir::Package makeBoundaryIdentityPackage(
+    hfir::TargetValueKind boundaryKind, std::uint64_t targetID) {
+  using namespace hfir;
+  Package package;
+  package.abiVersion = HF_ABI_VERSION;
+  package.patchID = boundaryKind == TargetValueKind::Object
+                        ? "vm.object-boundary"
+                        : "vm.string-boundary";
+  setTarget(package, targetID, boundaryKind, {boundaryKind});
+  const ValueType valueType = boundaryKind == TargetValueKind::Object
+                                  ? ValueType::Handle
+                                  : ValueType::String;
+  Function function;
+  function.name = "boundaryIdentity";
+  function.returnType = valueType;
+  function.parameterTypes = {valueType};
+  function.registerTypes = {valueType};
+  function.entryBlock = 0;
+  function.blocks = {{
+      0,
+      {{Opcode::Return, kNoRegister, ValueType::Void,
+        {{OperandKind::Register, valueType, 0}}}},
+  }};
+  package.functions = {std::move(function)};
+  return package;
+}
+
+hfir::Package makeNativeReceiverPackage() {
+  using namespace hfir;
+  Package package;
+  package.abiVersion = HF_ABI_VERSION;
+  package.patchID = "vm.native-receiver";
+  setTarget(package, 0x1103, TargetValueKind::I64, {TargetValueKind::I64},
+            TargetReceiverKind::Native);
+  Function function;
+  function.name = "nativeReceiverIdentity";
+  function.returnType = ValueType::I64;
+  function.parameterTypes = {ValueType::Handle, ValueType::I64};
+  function.registerTypes = {ValueType::Handle, ValueType::I64};
+  function.entryBlock = 0;
+  function.blocks = {{
+      0,
+      {{Opcode::Return, kNoRegister, ValueType::Void,
+        {{OperandKind::Register, ValueType::I64, 1}}}},
   }};
   package.functions = {std::move(function)};
   return package;
@@ -766,10 +829,150 @@ void testHostHandleGenerationOwnershipAndLease() {
           "host handle table leaked a live entry");
 }
 
+void testObjectAndStringTargetBoundaries() {
+  const std::uint64_t baseline = hf_host_handle_live_count();
+  void *string = IRHFObjCCreateStringUTF8("boundary", 8);
+  require(string != nullptr, "boundary string allocation failed");
+  HFHandle borrowed = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(string, HFHandleKindObject, &borrowed) ==
+              HFStatusApplied,
+          "boundary object scope registration failed");
+
+  const hfir::Package objectPackage = makeBoundaryIdentityPackage(
+      hfir::TargetValueKind::Object, 0x1101);
+  const HFIRPatchHandle objectPatch = installAndActivate(objectPackage);
+  HFValue objectArgument = HFValueFromHostHandle(
+      borrowed, HFValueFlagBorrowedHostHandle);
+  HFPatchFrame objectFrame = HFMakePatchFrame();
+  objectFrame.targetID = objectPackage.target.targetID;
+  objectFrame.signatureID = objectPackage.target.signatureID;
+  objectFrame.arguments = &objectArgument;
+  objectFrame.argumentCount = 1;
+  require(hf_hfir_vm_invoke(&objectFrame) == HFStatusApplied,
+          "object target boundary invocation failed");
+  HFHandle objectResult = HFInvalidHandle();
+  require(objectFrame.result.kind == HFValueKindHostHandle &&
+              objectFrame.result.flags == HFValueFlagRetainedHostHandle &&
+              HFValueGetHostHandle(&objectFrame.result, &objectResult),
+          "object target boundary did not return a transferred handle");
+  require(hf_host_handle_release(objectResult) == HFStatusApplied,
+          "object boundary result handle release failed");
+  require(hf_hfir_vm_uninstall(objectPatch) == HFStatusApplied,
+          "object boundary patch uninstall failed");
+
+  const hfir::Package stringPackage = makeBoundaryIdentityPackage(
+      hfir::TargetValueKind::String, 0x1102);
+  const HFIRPatchHandle stringPatch = installAndActivate(stringPackage);
+  HFValue stringArgument = HFValueFromStringHandle(
+      borrowed, HFValueFlagBorrowedHostHandle);
+  HFPatchFrame stringFrame = HFMakePatchFrame();
+  stringFrame.targetID = stringPackage.target.targetID;
+  stringFrame.signatureID = stringPackage.target.signatureID;
+  stringFrame.arguments = &stringArgument;
+  stringFrame.argumentCount = 1;
+  require(hf_hfir_vm_invoke(&stringFrame) == HFStatusApplied,
+          "string target boundary invocation failed");
+  HFHandle stringResult = HFInvalidHandle();
+  require(stringFrame.result.kind == HFValueKindStringHandle &&
+              stringFrame.result.flags == HFValueFlagRetainedHostHandle &&
+              HFValueGetStringHandle(&stringFrame.result, &stringResult),
+          "string target boundary did not preserve its distinct tag");
+  require(hf_host_handle_release(stringResult) == HFStatusApplied,
+          "string boundary result handle release failed");
+
+  HFPatchFrame wrongTag = HFMakePatchFrame();
+  wrongTag.targetID = stringPackage.target.targetID;
+  wrongTag.signatureID = stringPackage.target.signatureID;
+  wrongTag.arguments = &objectArgument;
+  wrongTag.argumentCount = 1;
+  require(hf_hfir_vm_invoke(&wrongTag) == HFStatusExecutionFailed,
+          "generic object handle was accepted as a String boundary value");
+
+  IRHFObjCInvocationResult objectCreation = IRHFObjCConstruct(
+      IRHFObjCLookUpClass("NSObject"), "init", nullptr, 0);
+  require(objectCreation.status == IRHFObjCInvocationStatusSuccess &&
+              objectCreation.value.kind == IRHFValueKindObject &&
+              objectCreation.value.bits != 0,
+          "non-string boundary object allocation failed");
+  void *plainObject = reinterpret_cast<void *>(
+      static_cast<std::uintptr_t>(objectCreation.value.bits));
+  HFHandle plainObjectHandle = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(plainObject, HFHandleKindObject,
+                                     &plainObjectHandle) == HFStatusApplied,
+          "non-string boundary handle registration failed");
+  HFValue forgedString = HFValueFromStringHandle(
+      plainObjectHandle, HFValueFlagBorrowedHostHandle);
+  HFPatchFrame wrongObject = stringFrame;
+  wrongObject.arguments = &forgedString;
+  wrongObject.result = HFMakeValue(HFValueKindInvalid, 0);
+  require(hf_hfir_vm_invoke(&wrongObject) == HFStatusExecutionFailed,
+          "non-NSString object was accepted behind a String handle tag");
+  require(hf_host_handle_scope_end(plainObjectHandle) == HFStatusApplied,
+          "non-string boundary handle release failed");
+  IRHFObjCReleaseRetainedObject(plainObject);
+
+  require(hf_hfir_vm_uninstall(stringPatch) == HFStatusApplied,
+          "string boundary patch uninstall failed");
+  require(hf_host_handle_scope_end(borrowed) == HFStatusApplied,
+          "boundary object scope release failed");
+  IRHFObjCReleaseRetainedObject(string);
+  require(hf_host_handle_live_count() == baseline,
+          "object/String boundary leaked a handle-table entry");
+}
+
+void testNativeTargetReceiverBoundary() {
+  const hfir::Package package = makeNativeReceiverPackage();
+  const HFIRPatchHandle patch = installAndActivate(package);
+  std::int64_t receiverStorage = 0;
+  HFHandle nativeReceiver = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(&receiverStorage, HFHandleKindNativeSymbol,
+                                     &nativeReceiver) == HFStatusApplied,
+          "native receiver registration failed");
+  HFValue argument = HFMakeValue(HFValueKindSignedInteger, 42);
+  HFPatchFrame frame = HFMakePatchFrame();
+  frame.targetID = package.target.targetID;
+  frame.signatureID = package.target.signatureID;
+  frame.flags = HFPatchFrameFlagHasReceiver;
+  frame.receiver = nativeReceiver;
+  frame.arguments = &argument;
+  frame.argumentCount = 1;
+  require(hf_hfir_vm_invoke(&frame) == HFStatusApplied &&
+              frame.result.kind == HFValueKindSignedInteger &&
+              frame.result.bits == 42,
+          "native target receiver invocation failed");
+
+  IRHFObjCInvocationResult objectCreation = IRHFObjCConstruct(
+      IRHFObjCLookUpClass("NSObject"), "init", nullptr, 0);
+  require(objectCreation.status == IRHFObjCInvocationStatusSuccess &&
+              objectCreation.value.kind == IRHFValueKindObject,
+          "receiver mismatch object allocation failed");
+  void *object = reinterpret_cast<void *>(
+      static_cast<std::uintptr_t>(objectCreation.value.bits));
+  HFHandle objectReceiver = HFInvalidHandle();
+  require(hf_host_handle_scope_begin(object, HFHandleKindObject,
+                                     &objectReceiver) == HFStatusApplied,
+          "object receiver registration failed");
+  frame.receiver = objectReceiver;
+  frame.result = HFMakeValue(HFValueKindInvalid, 0);
+  require(hf_hfir_vm_invoke(&frame) == HFStatusInvalidFrame,
+          "native target accepted an Objective-C object handle");
+  require(hf_host_handle_scope_end(objectReceiver) == HFStatusApplied,
+          "object receiver release failed");
+  IRHFObjCReleaseRetainedObject(object);
+  require(hf_host_handle_scope_end(nativeReceiver) == HFStatusApplied,
+          "native receiver release failed");
+  require(hf_hfir_vm_uninstall(patch) == HFStatusApplied,
+          "native receiver patch uninstall failed");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc == 5 && std::string(argv[1]) == "--invoke-i64") {
+  if (argc == 5 &&
+      (std::string(argv[1]) == "--invoke-i64" ||
+       std::string(argv[1]) == "--invoke-native-i64")) {
+    const bool hasNativeReceiver =
+        std::string(argv[1]) == "--invoke-native-i64";
     std::ifstream input(argv[2], std::ios::binary);
     require(input.good(), "cannot open patch for invocation");
     std::vector<std::uint8_t> bytes(
@@ -789,12 +992,23 @@ int main(int argc, char **argv) {
     frame.signatureID = handle.signatureID;
     frame.arguments = &argument;
     frame.argumentCount = 1;
+    std::int64_t receiverStorage = 0;
+    if (hasNativeReceiver) {
+      frame.flags = HFPatchFrameFlagHasReceiver;
+      require(hf_host_handle_scope_begin(&receiverStorage,
+                                         HFHandleKindNativeSymbol,
+                                         &frame.receiver) == HFStatusApplied,
+              "patch runner native receiver registration failed");
+    }
     require(hf_hfir_vm_invoke(&frame) == HFStatusApplied,
             "patch runner invocation failed");
     require(frame.result.kind == HFValueKindSignedInteger &&
                 static_cast<std::int64_t>(frame.result.bits) ==
                     std::stoll(argv[4]),
             "patch runner returned an unexpected value");
+    if (hasNativeReceiver)
+      require(hf_host_handle_scope_end(frame.receiver) == HFStatusApplied,
+              "patch runner native receiver release failed");
     require(hf_hfir_vm_uninstall(handle) == HFStatusApplied,
             "patch runner uninstall failed");
     std::cout << "HFIR patch invocation passed\n";
@@ -843,6 +1057,8 @@ int main(int argc, char **argv) {
   testNativeCXXMethodGateway();
   testSwitchAndConstantPhi();
   testHostHandleGenerationOwnershipAndLease();
+  testObjectAndStringTargetBoundaries();
+  testNativeTargetReceiverBoundary();
   std::cout << "HFIRVMTests passed\n";
   return 0;
 }

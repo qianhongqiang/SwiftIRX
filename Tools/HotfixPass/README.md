@@ -277,11 +277,11 @@ only `token + generation + kind + ownership` in `HFHandle`. A borrowed entry is
 released after the synchronous invocation. Raw host addresses are exposed only
 inside a validated invocation lease. UIKit bridging requires the main thread.
 
-The patch author must make the entry return kind agree with the canonical
-signature return kind. The runtime checks entry parameter types, but it does not
-currently cross-check an `i64` patch result against an `i1` target or vice versa.
-An `i1` result used by an `i64` trampoline becomes `0` or `1`; an `i64` result
-used by an `i1` trampoline is truncated by that trampoline.
+The patch compiler writes the complete Target ABI Schema into `.hfpatch`.
+Build-time lowering, container installation and invocation all validate it.
+The signature ID is recomputed from the schema, and the entry return type,
+ordered arguments and receiver must match exactly; a mismatched result kind no
+longer reaches the trampoline.
 
 ## Supported ABI envelope
 
@@ -434,6 +434,36 @@ The text output is an inspectable build intermediate. `HotfixPatchTool` lowers
 it to the publishable `.hfpatch`, which is the only patch format accepted by the
 app runtime. Rebuild it whenever the matching app's Manifest symbol or ABI
 changes.
+
+## C / C++ Patch Compiler
+
+`clang-patch-build` compiles one top-level C or C++ `hotfixPatch` function to
+LLVM bitcode and feeds the same validated HFIR lowerer used by Swift. C targets
+use no receiver. A non-virtual C++ instance-method target uses a first
+`void *receiver` parameter and declares `"receiverKind": "native"` in the
+Target Manifest; the runtime requires a live `HFHandleKindNativeSymbol` rather
+than treating `this` as an object pointer.
+
+```bash
+Tools/HotfixPass/clang-patch-build \
+  --language c \
+  --manifest PatchExamples/HotfixTargetManifest.json \
+  --target hotfix_example_c_add \
+  --source PatchExamples/Sources/HotfixC.c \
+  --output IR/Patches/HotfixC.hfpatch
+
+Tools/HotfixPass/clang-patch-build \
+  --language cxx \
+  --manifest PatchExamples/HotfixTargetManifest.json \
+  --target HFCalculator \
+  --source PatchExamples/Sources/HotfixCXX.cpp \
+  --output IR/Patches/HotfixCXX.hfpatch
+```
+
+The first C/C++ subset supports scalar/Bool/Float/Double signatures, branches,
+loops and directly reachable local helpers. It deliberately excludes virtual
+dispatch, exceptions, RTTI, templates or STL values at the target boundary,
+and C++ object layout access through the receiver.
 
 ## Supported Swift Patch language subset
 

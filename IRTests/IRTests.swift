@@ -44,6 +44,12 @@ struct IRTests {
                 $0.argumentKinds.isEmpty &&
                 $0.hasReceiver
         })
+        #expect(manifest.target(
+            symbol: "hotfix_example_c_add"
+        )?.effectiveReceiverKind == HotfixTargetReceiverKind.none)
+        #expect(manifest.target(
+            symbol: "_ZN12HFCalculator8multiplyEx"
+        )?.effectiveReceiverKind == .native)
     }
 
     @Test func bundledHostAdapterManifestMatchesGeneratedGateways() throws {
@@ -223,5 +229,11 @@ struct IRTests {
         #expect(try withPatch("HotfixHostAdapter") {
             hotfixExampleHostAdapter(10)
         } == 22)
+        #expect(try withPatch("HotfixC") {
+            hotfix_example_c_add(10)
+        } == 210)
+        #expect(try withPatch("HotfixCXX") {
+            hotfix_example_cxx_multiply(8)
+        } == 40)
     }
 }

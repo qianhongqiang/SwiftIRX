@@ -1229,8 +1229,9 @@ private:
 } // namespace
 
 bool lowerFunction(Module &module, Function &function, std::uint64_t targetID,
-                   std::uint64_t signatureID, hfir::Package &package,
-                   std::string &error) {
+                   std::uint64_t signatureID,
+                   const hfir::TargetABISchema &targetABI,
+                   hfir::Package &package, std::string &error) {
   std::vector<Function *> reachable;
   std::set<Function *> visited;
   std::vector<Function *> worklist = {&function};
@@ -1257,7 +1258,10 @@ bool lowerFunction(Module &module, Function &function, std::uint64_t targetID,
   package = {};
   package.abiVersion = HF_ABI_VERSION;
   package.patchID = "hfir." + utohexstr(targetID, true, 16);
-  package.target = {targetID, signatureID, 0};
+  package.target.targetID = targetID;
+  package.target.signatureID = signatureID;
+  package.target.entryFunction = 0;
+  package.target.abi = targetABI;
   package.functions.resize(reachable.size());
   std::unordered_map<const Function *, std::uint32_t> functionIndices;
   for (std::size_t index = 0; index < reachable.size(); ++index)

@@ -26,6 +26,8 @@ namespace {
 constexpr uint32_t ManifestSchemaVersion = 1;
 constexpr StringLiteral DescriptorSection = "__DATA,__hotfix";
 
+enum class ReceiverKind { None, Object, Native };
+
 struct Target {
   std::string symbol;
   uint64_t targetID = 0;
@@ -33,15 +35,33 @@ struct Target {
   uint32_t returnKind = HFValueKindInvalid;
   std::vector<uint32_t> argumentKinds;
   bool hasReceiver = false;
+  ReceiverKind receiverKind = ReceiverKind::None;
 
   bool operator==(const Target &other) const {
     return symbol == other.symbol && targetID == other.targetID &&
            signatureID == other.signatureID &&
            returnKind == other.returnKind &&
            argumentKinds == other.argumentKinds &&
-           hasReceiver == other.hasReceiver;
+           hasReceiver == other.hasReceiver &&
+           receiverKind == other.receiverKind;
   }
 };
+
+StringRef receiverKindName(ReceiverKind kind) {
+  switch (kind) {
+  case ReceiverKind::None: return "none";
+  case ReceiverKind::Object: return "object";
+  case ReceiverKind::Native: return "native";
+  }
+  llvm_unreachable("invalid receiver kind");
+}
+
+std::optional<ReceiverKind> parseReceiverKind(StringRef name) {
+  if (name == "none") return ReceiverKind::None;
+  if (name == "object") return ReceiverKind::Object;
+  if (name == "native") return ReceiverKind::Native;
+  return std::nullopt;
+}
 
 uint64_t fnv1a64(StringRef text) {
   uint64_t hash = 14695981039346656037ULL;
@@ -62,6 +82,10 @@ std::optional<StringRef> abiName(uint32_t kind, bool allowVoid) {
     return "f32";
   case HFValueKindFloat64:
     return "f64";
+  case HFValueKindHostHandle:
+    return "object";
+  case HFValueKindStringHandle:
+    return "string";
   case HFValueKindVoid:
     if (allowVoid)
       return "void";
@@ -182,7 +206,9 @@ bool extractTarget(const GlobalVariable &global, Target &target,
             "' has an invalid HFDescriptor layout";
     return false;
   }
-  if ((flags & ~uint64_t(HFDescriptorFlagHasReceiver)) != 0) {
+  constexpr uint64_t KnownFlags = HFDescriptorFlagHasReceiver |
+                                  HFDescriptorFlagNativeReceiver;
+  if ((flags & ~KnownFlags) != 0) {
     error = "global '" + global.getName().str() +
             "' has unknown descriptor flags";
     return false;
@@ -237,6 +263,17 @@ bool extractTarget(const GlobalVariable &global, Target &target,
   target.returnKind = returnKind;
   target.argumentKinds = std::move(kinds);
   target.hasReceiver = (flags & HFDescriptorFlagHasReceiver) != 0;
+  if ((flags & HFDescriptorFlagNativeReceiver) != 0 && !target.hasReceiver) {
+    error = "global '" + global.getName().str() +
+            "' marks a native receiver without a receiver";
+    return false;
+  }
+  target.receiverKind =
+      !target.hasReceiver
+          ? ReceiverKind::None
+          : ((flags & HFDescriptorFlagNativeReceiver) != 0
+                 ? ReceiverKind::Native
+                 : ReceiverKind::Object);
   return true;
 }
 
@@ -286,6 +323,10 @@ std::optional<uint32_t> parseKind(StringRef text, bool allowVoid) {
     return HFValueKindFloat32;
   if (text == "f64")
     return HFValueKindFloat64;
+  if (text == "object")
+    return HFValueKindHostHandle;
+  if (text == "string")
+    return HFValueKindStringHandle;
   if (allowVoid && text == "void")
     return HFValueKindVoid;
   return std::nullopt;
@@ -332,6 +373,7 @@ bool mergeManifest(StringRef inputPath, std::map<uint64_t, Target> &targets,
     std::optional<StringRef> signatureID = object->getString("signatureID");
     std::optional<StringRef> returnName = object->getString("returnKind");
     std::optional<bool> hasReceiver = object->getBoolean("hasReceiver");
+    std::optional<StringRef> receiverName = object->getString("receiverKind");
     const json::Array *argumentNames = object->getArray("argumentKinds");
     if (!symbol || !targetID || !signatureID || !returnName || !hasReceiver ||
         argumentNames == nullptr) {
@@ -354,6 +396,22 @@ bool mergeManifest(StringRef inputPath, std::map<uint64_t, Target> &targets,
     }
     target.returnKind = *parsedReturn;
     target.hasReceiver = *hasReceiver;
+    if (receiverName) {
+      const auto parsedReceiver = parseReceiverKind(*receiverName);
+      if (!parsedReceiver) {
+        error = "target '" + target.symbol + "' has an invalid receiver kind";
+        return false;
+      }
+      target.receiverKind = *parsedReceiver;
+    } else {
+      target.receiverKind =
+          target.hasReceiver ? ReceiverKind::Object : ReceiverKind::None;
+    }
+    if (target.hasReceiver != (target.receiverKind != ReceiverKind::None)) {
+      error = "target '" + target.symbol +
+              "' has inconsistent hasReceiver and receiverKind";
+      return false;
+    }
     for (const json::Value &argumentName : *argumentNames) {
       std::optional<StringRef> name = argumentName.getAsString();
       std::optional<uint32_t> kind =
@@ -408,6 +466,8 @@ bool writeManifest(StringRef outputPath,
               json.value(*abiName(kind, false));
           });
           json.attribute("hasReceiver", target->hasReceiver);
+          json.attribute("receiverKind",
+                         receiverKindName(target->receiverKind));
         });
       }
     });

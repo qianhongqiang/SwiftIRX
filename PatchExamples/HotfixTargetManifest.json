@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "abiVersion": 3,
+  "targets": [
+    {
+      "symbol": "$s2IR19hotfixExampleBranchySbSiF",
+      "targetID": "0xe315ff683bec087d",
+      "signatureID": "0x4d45c1168c06aa1c",
+      "returnKind": "i1",
+      "argumentKinds": ["i64"],
+      "hasReceiver": false,
+      "receiverKind": "none"
+    },
+    {
+      "symbol": "$s2IR20hotfixExampleIntegeryS2iF",
+      "targetID": "0xc61588b01881f24e",
+      "signatureID": "0xa41bdf07a2f121e1",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "hasReceiver": false,
+      "receiverKind": "none"
+    },
+    {
+      "symbol": "$s2IR23HotfixExampleCalculatorC8multiplyyS2iF",
+      "targetID": "0x465389b453cfc75e",
+      "signatureID": "0xa41bde07a2f1202e",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "hasReceiver": true,
+      "receiverKind": "object"
+    },
+    {
+      "symbol": "$s2IR24hotfixExampleHostAdapteryS2iF",
+      "targetID": "0x850be2c5bce1802b",
+      "signatureID": "0xa41bdf07a2f121e1",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "hasReceiver": false,
+      "receiverKind": "none"
+    },
+    {
+      "symbol": "$s2IR14ViewControllerC7setupUI33_7B2304FAFD7CFEBD5E611A21DD4D9FE6LLyyF",
+      "targetID": "0x1232093bb65a3a2b",
+      "signatureID": "0x988cc6a5a1ee0058",
+      "returnKind": "void",
+      "argumentKinds": [],
+      "hasReceiver": true,
+      "receiverKind": "object"
+    },
+    {
+      "symbol": "hotfix_example_c_add",
+      "targetID": "0x509615878e53c0ac",
+      "signatureID": "0xa41bdf07a2f121e1",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "hasReceiver": false,
+      "receiverKind": "none"
+    },
+    {
+      "symbol": "_ZN12HFCalculator8multiplyEx",
+      "targetID": "0x377fcf21d0d94ffc",
+      "signatureID": "0xa41bde07a2f1202e",
+      "returnKind": "i64",
+      "argumentKinds": ["i64"],
+      "hasReceiver": true,
+      "receiverKind": "native"
+    }
+  ]
+}

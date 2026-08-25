@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 BUILDER="$ROOT/Tools/HotfixPass/swift-patch-build"
+CLANG_BUILDER="$ROOT/Tools/HotfixPass/clang-patch-build"
 PATCH_TOOL="$ROOT/Tools/HotfixPass/.build/HotfixPatchTool"
 MACRO_PACKAGE="$ROOT/Tools/HotfixMacros"
 ANNOTATION="$ROOT/SDK/IRHotfixSDK/Runtime/HotfixPatchAnnotation.swift"
@@ -25,6 +26,37 @@ trap cleanup EXIT
   echo "error: Swift patch builder is not executable: $BUILDER" >&2
   exit 1
 }
+[[ -x "$CLANG_BUILDER" ]] || {
+  echo "error: Clang patch builder is not executable: $CLANG_BUILDER" >&2
+  exit 1
+}
+
+"$CLANG_BUILDER" \
+  --language c \
+  --manifest "$ROOT/PatchExamples/HotfixTargetManifest.json" \
+  --target hotfix_example_c_add \
+  --source "$ROOT/PatchExamples/Sources/HotfixC.c" \
+  --output "$TEMP/native-c.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify \
+  "$TEMP/native-c.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-i64 "$TEMP/native-c.hfpatch" 10 210
+
+"$CLANG_BUILDER" \
+  --language cxx \
+  --manifest "$ROOT/PatchExamples/HotfixTargetManifest.json" \
+  --target HFCalculator \
+  --source "$ROOT/PatchExamples/Sources/HotfixCXX.cpp" \
+  --output "$TEMP/native-cxx.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" verify \
+  "$TEMP/native-cxx.hfpatch"
+"$ROOT/Tools/HotfixPass/.build/HotfixPackageTool" dump \
+  "$TEMP/native-cxx.hfpatch" >"$TEMP/native-cxx.hfir.txt"
+grep -Fq 'target-abi return i64 receiver native arguments (i64)' \
+  "$TEMP/native-cxx.hfir.txt"
+grep -Fq 'function.call' "$TEMP/native-cxx.hfir.txt"
+"$ROOT/Tools/HotfixPass/.build/HFIRVMTests" \
+  --invoke-native-i64 "$TEMP/native-cxx.hfpatch" 8 40
 
 "$BUILDER" \
   --manifest "$MANIFEST" \

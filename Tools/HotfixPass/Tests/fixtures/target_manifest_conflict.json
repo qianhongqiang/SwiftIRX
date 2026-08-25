@@ -10,7 +10,8 @@
       "argumentKinds": [
         "i64"
       ],
-      "hasReceiver": true
+      "hasReceiver": true,
+      "receiverKind": "object"
     }
   ]
 }

@@ -460,6 +460,28 @@ const char *valueTypeName(ValueType type) {
   return "invalid";
 }
 
+const char *targetValueKindName(TargetValueKind type) {
+  switch (type) {
+  case TargetValueKind::Void: return "void";
+  case TargetValueKind::Bool: return "i1";
+  case TargetValueKind::I64: return "i64";
+  case TargetValueKind::F32: return "f32";
+  case TargetValueKind::F64: return "f64";
+  case TargetValueKind::Object: return "object";
+  case TargetValueKind::String: return "string";
+  }
+  return "invalid";
+}
+
+const char *targetReceiverKindName(TargetReceiverKind kind) {
+  switch (kind) {
+  case TargetReceiverKind::None: return "none";
+  case TargetReceiverKind::Object: return "object";
+  case TargetReceiverKind::Native: return "native";
+  }
+  return "invalid";
+}
+
 const char *constantKindName(ConstantKind kind) {
   switch (kind) {
   case ConstantKind::Bool: return "bool";
@@ -562,6 +584,45 @@ bool isValidValueType(ValueType type) {
          static_cast<std::uint8_t>(ValueType::Rect);
 }
 
+bool isValidTargetValueKind(TargetValueKind type, bool allowVoid) {
+  const auto raw = static_cast<std::uint8_t>(type);
+  return raw <= static_cast<std::uint8_t>(TargetValueKind::String) &&
+         (allowVoid || type != TargetValueKind::Void);
+}
+
+bool targetValueType(TargetValueKind type, ValueType &valueType) {
+  switch (type) {
+  case TargetValueKind::Void: valueType = ValueType::Void; return true;
+  case TargetValueKind::Bool: valueType = ValueType::Bool; return true;
+  case TargetValueKind::I64: valueType = ValueType::I64; return true;
+  case TargetValueKind::F32:
+  case TargetValueKind::F64: valueType = ValueType::F64; return true;
+  case TargetValueKind::Object: valueType = ValueType::Handle; return true;
+  case TargetValueKind::String: valueType = ValueType::String; return true;
+  }
+  return false;
+}
+
+std::uint64_t targetSignatureID(const TargetABISchema &schema) {
+  std::string canonical = "return=";
+  canonical += targetValueKindName(schema.returnType);
+  canonical += ";arguments=";
+  for (std::size_t index = 0; index < schema.parameterTypes.size(); ++index) {
+    if (index != 0)
+      canonical += ',';
+    canonical += targetValueKindName(schema.parameterTypes[index]);
+  }
+  canonical += schema.receiverKind == TargetReceiverKind::None
+                   ? ";receiver=0"
+                   : ";receiver=1";
+  std::uint64_t hash = 14695981039346656037ULL;
+  for (unsigned char byte : canonical) {
+    hash ^= byte;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
 bool isTerminator(Opcode opcode) {
   return opcode == Opcode::Branch || opcode == Opcode::ConditionalBranch ||
          opcode == Opcode::Switch || opcode == Opcode::Return ||
@@ -580,6 +641,54 @@ bool verify(const Package &package, std::string &error) {
     return fail(error, "package.functions", "must contain at least one function");
   if (package.target.entryFunction >= package.functions.size())
     return fail(error, "package.target.entryFunction", "is out of range");
+
+  const TargetABISchema &targetABI = package.target.abi;
+  if (!isValidTargetValueKind(targetABI.returnType, true))
+    return fail(error, "package.target.abi.returnType",
+                "invalid target ABI value kind");
+  if (targetABI.parameterTypes.size() > kMaximumTargetArgumentCount)
+    return fail(error, "package.target.abi.parameterTypes",
+                "exceeds maximum target argument count");
+  for (std::size_t index = 0; index < targetABI.parameterTypes.size(); ++index) {
+    if (!isValidTargetValueKind(targetABI.parameterTypes[index], false))
+      return fail(error,
+                  "package.target.abi.parameterTypes[" +
+                      std::to_string(index) + "]",
+                  "invalid target ABI value kind");
+  }
+  if (targetABI.receiverKind != TargetReceiverKind::None &&
+      targetABI.receiverKind != TargetReceiverKind::Object &&
+      targetABI.receiverKind != TargetReceiverKind::Native)
+    return fail(error, "package.target.abi.receiverKind",
+                "invalid target receiver kind");
+  if (targetSignatureID(targetABI) != package.target.signatureID)
+    return fail(error, "package.target.signatureID",
+                "does not match the canonical target ABI schema");
+
+  const Function &entry = package.functions[package.target.entryFunction];
+  ValueType expectedReturn = ValueType::Void;
+  if (!targetValueType(targetABI.returnType, expectedReturn) ||
+      entry.returnType != expectedReturn)
+    return fail(error, "package.target.abi.returnType",
+                "does not match the entry function return type");
+  const std::size_t receiverCount =
+      targetABI.receiverKind == TargetReceiverKind::None ? 0 : 1;
+  if (entry.parameterTypes.size() !=
+      targetABI.parameterTypes.size() + receiverCount)
+    return fail(error, "package.target.abi.parameterTypes",
+                "does not match the entry function parameter count");
+  if (receiverCount != 0 && entry.parameterTypes.front() != ValueType::Handle)
+    return fail(error, "package.target.abi.receiverKind",
+                "receiver does not map to an entry handle parameter");
+  for (std::size_t index = 0; index < targetABI.parameterTypes.size(); ++index) {
+    ValueType expected = ValueType::Void;
+    if (!targetValueType(targetABI.parameterTypes[index], expected) ||
+        entry.parameterTypes[index + receiverCount] != expected)
+      return fail(error,
+                  "package.target.abi.parameterTypes[" +
+                      std::to_string(index) + "]",
+                  "does not match the entry function parameter type");
+  }
 
   for (std::size_t index = 0; index < package.constants.size(); ++index) {
     const Constant &constant = package.constants[index];

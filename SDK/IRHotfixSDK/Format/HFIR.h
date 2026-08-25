@@ -9,8 +9,9 @@
 
 namespace irhotfix::hfir {
 
-inline constexpr std::uint16_t kVersion = 2;
+inline constexpr std::uint16_t kVersion = 3;
 inline constexpr std::size_t kMaximumHostArgumentCount = 16;
+inline constexpr std::size_t kMaximumTargetArgumentCount = 8;
 inline constexpr std::uint32_t kNoRegister =
     std::numeric_limits<std::uint32_t>::max();
 
@@ -25,6 +26,31 @@ enum class ValueType : std::uint8_t {
   Point = 7,
   Size = 8,
   Rect = 9,
+};
+
+// Public target ABI kinds are intentionally separate from VM value types.
+// In particular, Swift Float and Double both execute as F64 inside the VM,
+// while their external calling conventions must remain distinguishable.
+enum class TargetValueKind : std::uint8_t {
+  Void = 0,
+  Bool = 1,
+  I64 = 2,
+  F32 = 3,
+  F64 = 4,
+  Object = 5,
+  String = 6,
+};
+
+enum class TargetReceiverKind : std::uint8_t {
+  None = 0,
+  Object = 1,
+  Native = 2,
+};
+
+struct TargetABISchema {
+  TargetValueKind returnType = TargetValueKind::Void;
+  std::vector<TargetValueKind> parameterTypes;
+  TargetReceiverKind receiverKind = TargetReceiverKind::None;
 };
 
 enum class ConstantKind : std::uint8_t {
@@ -168,6 +194,7 @@ struct TargetDescriptor {
   std::uint64_t targetID = 0;
   std::uint64_t signatureID = 0;
   std::uint32_t entryFunction = 0;
+  TargetABISchema abi;
 };
 
 struct DebugLocation {
@@ -197,12 +224,17 @@ struct Package {
 };
 
 const char *valueTypeName(ValueType type);
+const char *targetValueKindName(TargetValueKind type);
+const char *targetReceiverKindName(TargetReceiverKind kind);
 const char *constantKindName(ConstantKind kind);
 const char *hostImportKindName(HostImportKind kind);
 const char *operandKindName(OperandKind kind);
 const char *opcodeName(Opcode opcode);
 
 bool isValidValueType(ValueType type);
+bool isValidTargetValueKind(TargetValueKind type, bool allowVoid);
+bool targetValueType(TargetValueKind type, ValueType &valueType);
+std::uint64_t targetSignatureID(const TargetABISchema &schema);
 bool isTerminator(Opcode opcode);
 
 // Validates the stable HFIR contract independently of the binary container.

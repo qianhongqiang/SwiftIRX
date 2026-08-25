@@ -18,6 +18,9 @@ enum {
     HFValueKindMemoryOffset = 7,
     HFValueKindHostHandle = 8,
     HFValueKindBytes = 9,
+    /// A validated NSString-compatible object carried by an HFHandle.
+    /// It is distinct from a generic object handle at the target ABI boundary.
+    HFValueKindStringHandle = 10,
 };
 
 typedef uint32_t HFValueFlags;
@@ -50,9 +53,10 @@ static inline HFValue HFMakeValue(HFValueKind kind, uint64_t bits) {
     return value;
 }
 
-static inline HFValue HFValueFromHostHandle(HFHandle handle,
-                                             HFValueFlags ownership) {
-    HFValue value = HFMakeValue(HFValueKindHostHandle, handle.token);
+static inline HFValue HFValueFromTypedHostHandle(HFValueKind kind,
+                                                  HFHandle handle,
+                                                  HFValueFlags ownership) {
+    HFValue value = HFMakeValue(kind, handle.token);
     value.flags = handle.token == 0 ? HFValueFlagNone : ownership;
     value.byteCount = ((uint64_t)handle.generation << 32) |
                       ((uint64_t)handle.kind << 16) |
@@ -60,10 +64,23 @@ static inline HFValue HFValueFromHostHandle(HFHandle handle,
     return value;
 }
 
-static inline int HFValueGetHostHandle(const HFValue *value,
-                                       HFHandle *handle) {
-    if (value == NULL || handle == NULL ||
-        value->kind != HFValueKindHostHandle || value->bytes != NULL) {
+static inline HFValue HFValueFromHostHandle(HFHandle handle,
+                                             HFValueFlags ownership) {
+    return HFValueFromTypedHostHandle(HFValueKindHostHandle, handle,
+                                      ownership);
+}
+
+static inline HFValue HFValueFromStringHandle(HFHandle handle,
+                                               HFValueFlags ownership) {
+    return HFValueFromTypedHostHandle(HFValueKindStringHandle, handle,
+                                      ownership);
+}
+
+static inline int HFValueGetTypedHostHandle(const HFValue *value,
+                                             HFValueKind expectedKind,
+                                             HFHandle *handle) {
+    if (value == NULL || handle == NULL || value->kind != expectedKind ||
+        value->bytes != NULL) {
         return 0;
     }
     if (value->bits == 0) {
@@ -82,6 +99,16 @@ static inline int HFValueGetHostHandle(const HFValue *value,
     handle->kind = (HFHandleKind)((value->byteCount >> 16) & 0xffffu);
     handle->flags = (HFHandleFlags)(value->byteCount & 0xffffu);
     return handle->generation != 0 && handle->kind != HFHandleKindInvalid;
+}
+
+static inline int HFValueGetHostHandle(const HFValue *value,
+                                       HFHandle *handle) {
+    return HFValueGetTypedHostHandle(value, HFValueKindHostHandle, handle);
+}
+
+static inline int HFValueGetStringHandle(const HFValue *value,
+                                          HFHandle *handle) {
+    return HFValueGetTypedHostHandle(value, HFValueKindStringHandle, handle);
 }
 
 #if defined(__cplusplus)

@@ -8,3 +8,5 @@
 #include "../HostAdapter/HFHostAdapter.h"
 #include "../HostAdapter/HFGeneratedHostAdapters.h"
 #include "../VM/HFIRRuntime.h"
+#include "../Runtime/HFNativePatchRuntime.h"
+#include "../../../IR/NativeExamples/HotfixNativeExamples.h"

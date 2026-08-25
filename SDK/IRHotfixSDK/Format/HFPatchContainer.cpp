@@ -199,6 +199,13 @@ void encodeValueTypes(Writer &writer,
     writer.u8(static_cast<std::uint8_t>(type));
 }
 
+void encodeTargetValueTypes(
+    Writer &writer, const std::vector<hfir::TargetValueKind> &types) {
+  writer.u32(static_cast<std::uint32_t>(types.size()));
+  for (hfir::TargetValueKind type : types)
+    writer.u8(static_cast<std::uint8_t>(type));
+}
+
 bool decodeValueType(Reader &reader, hfir::ValueType &type,
                      std::string &error) {
   std::uint8_t raw = 0;
@@ -221,12 +228,32 @@ bool decodeValueTypes(Reader &reader, std::vector<hfir::ValueType> &types,
   return true;
 }
 
+bool decodeTargetValueTypes(
+    Reader &reader, std::vector<hfir::TargetValueKind> &types,
+    std::string &error) {
+  std::uint32_t count = 0;
+  if (!reader.count(count, error))
+    return false;
+  types.resize(count);
+  for (hfir::TargetValueKind &type : types) {
+    std::uint8_t raw = 0;
+    if (!reader.u8(raw, error))
+      return false;
+    type = static_cast<hfir::TargetValueKind>(raw);
+  }
+  return true;
+}
+
 EncodedSection encodeMetadata(const hfir::Package &package) {
   Writer writer;
   writer.string(package.patchID);
   writer.u64(package.target.targetID);
   writer.u64(package.target.signatureID);
   writer.u32(package.target.entryFunction);
+  writer.u8(static_cast<std::uint8_t>(package.target.abi.returnType));
+  writer.u8(static_cast<std::uint8_t>(package.target.abi.receiverKind));
+  writer.u16(0);
+  encodeTargetValueTypes(writer, package.target.abi.parameterTypes);
   return {SectionType::Metadata, 1, writer.take()};
 }
 
@@ -321,10 +348,26 @@ bool decodeMetadata(const SectionEntry &entry,
                     const std::vector<std::uint8_t> &input,
                     hfir::Package &package, std::string &error) {
   Reader reader(input.data() + entry.offset, entry.size, "metadata section");
-  return reader.string(package.patchID, error) &&
-         reader.u64(package.target.targetID, error) &&
-         reader.u64(package.target.signatureID, error) &&
-         reader.u32(package.target.entryFunction, error) && reader.finish(error);
+  std::uint8_t returnType = 0;
+  std::uint8_t receiverKind = 0;
+  std::uint16_t reserved = 0;
+  if (!reader.string(package.patchID, error) ||
+      !reader.u64(package.target.targetID, error) ||
+      !reader.u64(package.target.signatureID, error) ||
+      !reader.u32(package.target.entryFunction, error) ||
+      !reader.u8(returnType, error) || !reader.u8(receiverKind, error) ||
+      !reader.u16(reserved, error) || reserved != 0 ||
+      !decodeTargetValueTypes(reader, package.target.abi.parameterTypes,
+                              error)) {
+    if (reserved != 0 && error.empty())
+      error = "metadata section: reserved target ABI bits must be zero";
+    return false;
+  }
+  package.target.abi.returnType =
+      static_cast<hfir::TargetValueKind>(returnType);
+  package.target.abi.receiverKind =
+      static_cast<hfir::TargetReceiverKind>(receiverKind);
+  return reader.finish(error);
 }
 
 bool decodeConstants(const SectionEntry &entry,
@@ -724,6 +767,19 @@ std::string dump(const hfir::Package &package) {
   output << "target " << hex64(package.target.targetID) << " signature "
          << hex64(package.target.signatureID) << " entry @"
          << package.target.entryFunction << '\n';
+  output << "target-abi return "
+         << hfir::targetValueKindName(package.target.abi.returnType)
+         << " receiver "
+         << hfir::targetReceiverKindName(package.target.abi.receiverKind)
+         << " arguments (";
+  for (std::size_t index = 0;
+       index < package.target.abi.parameterTypes.size(); ++index) {
+    if (index != 0)
+      output << ", ";
+    output << hfir::targetValueKindName(
+        package.target.abi.parameterTypes[index]);
+  }
+  output << ")\n";
 
   output << "constants " << package.constants.size() << '\n';
   for (std::size_t index = 0; index < package.constants.size(); ++index) {

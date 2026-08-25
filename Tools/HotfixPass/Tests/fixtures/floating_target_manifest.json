@@ -10,7 +10,8 @@
       "argumentKinds": [
         "f64"
       ],
-      "hasReceiver": false
+      "hasReceiver": false,
+      "receiverKind": "none"
     },
     {
       "symbol": "floatTarget",
@@ -20,7 +21,8 @@
       "argumentKinds": [
         "f32"
       ],
-      "hasReceiver": false
+      "hasReceiver": false,
+      "receiverKind": "none"
     }
   ]
 }

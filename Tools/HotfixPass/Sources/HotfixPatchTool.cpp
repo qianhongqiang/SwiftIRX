@@ -33,6 +33,7 @@ using namespace llvm;
 namespace {
 constexpr uint32_t ManifestSchemaVersion = 1;
 constexpr StringLiteral PatchEntryName = "__ir_hotfix_patch_entry";
+constexpr StringLiteral SourcePatchEntryName = "hotfixPatch";
 
 struct Target {
   std::string symbol;
@@ -41,7 +42,18 @@ struct Target {
   std::string returnKind;
   std::vector<std::string> argumentKinds;
   bool hasReceiver = false;
+  irhotfix::hfir::TargetReceiverKind receiverKind =
+      irhotfix::hfir::TargetReceiverKind::None;
 };
+
+std::optional<irhotfix::hfir::TargetReceiverKind>
+parseReceiverKind(StringRef kind) {
+  using Kind = irhotfix::hfir::TargetReceiverKind;
+  if (kind == "none") return Kind::None;
+  if (kind == "object") return Kind::Object;
+  if (kind == "native") return Kind::Native;
+  return std::nullopt;
+}
 
 uint64_t fnv1a64(StringRef text) {
   uint64_t hash = 14695981039346656037ULL;
@@ -59,7 +71,44 @@ bool parseHexID(StringRef text, uint64_t &value) {
 
 bool isValueKind(StringRef kind, bool allowVoid) {
   return kind == "i64" || kind == "i1" || kind == "f32" || kind == "f64" ||
+         kind == "object" || kind == "string" ||
          (allowVoid && kind == "void");
+}
+
+std::optional<irhotfix::hfir::TargetValueKind>
+targetValueKind(StringRef kind) {
+  using Kind = irhotfix::hfir::TargetValueKind;
+  if (kind == "void") return Kind::Void;
+  if (kind == "i1") return Kind::Bool;
+  if (kind == "i64") return Kind::I64;
+  if (kind == "f32") return Kind::F32;
+  if (kind == "f64") return Kind::F64;
+  if (kind == "object") return Kind::Object;
+  if (kind == "string") return Kind::String;
+  return std::nullopt;
+}
+
+bool makeTargetABI(const Target &target,
+                   irhotfix::hfir::TargetABISchema &schema,
+                   std::string &error) {
+  const auto returnType = targetValueKind(target.returnKind);
+  if (!returnType) {
+    error = "target '" + target.symbol + "' has an invalid ABI return kind";
+    return false;
+  }
+  schema = {};
+  schema.returnType = *returnType;
+  schema.receiverKind = target.receiverKind;
+  for (const std::string &name : target.argumentKinds) {
+    const auto type = targetValueKind(name);
+    if (!type) {
+      error = "target '" + target.symbol +
+              "' has an invalid ABI argument kind";
+      return false;
+    }
+    schema.parameterTypes.push_back(*type);
+  }
+  return true;
 }
 
 std::string canonicalSignature(const Target &target) {
@@ -90,6 +139,24 @@ bool parseTarget(const json::Object &object, Target &target,
   target.symbol = symbol->str();
   target.returnKind = returnKind->str();
   target.hasReceiver = *hasReceiver;
+  if (std::optional<StringRef> receiverName = object.getString("receiverKind")) {
+    const auto parsed = parseReceiverKind(*receiverName);
+    if (!parsed) {
+      error = "target '" + target.symbol + "' has an invalid receiver kind";
+      return false;
+    }
+    target.receiverKind = *parsed;
+  } else {
+    target.receiverKind = target.hasReceiver
+                              ? irhotfix::hfir::TargetReceiverKind::Object
+                              : irhotfix::hfir::TargetReceiverKind::None;
+  }
+  if (target.hasReceiver !=
+      (target.receiverKind != irhotfix::hfir::TargetReceiverKind::None)) {
+    error = "target '" + target.symbol +
+            "' has inconsistent hasReceiver and receiverKind";
+    return false;
+  }
   if (target.symbol.empty() || !parseHexID(*targetID, target.targetID) ||
       !parseHexID(*signatureID, target.signatureID)) {
     error = "target manifest contains an invalid symbol or ID";
@@ -193,16 +260,30 @@ bool matchesKind(Type *type, StringRef kind) {
     return type->isFloatTy();
   if (kind == "f64")
     return type->isDoubleTy();
+  if (kind == "object")
+    return type->isPointerTy();
+  // Native Swift.String is not a stable pointer ABI. It requires the explicit
+  // String boundary adapter and is deliberately rejected until that adapter
+  // rewrites the patch entry to the canonical string-handle form.
+  if (kind == "string")
+    return false;
   return false;
 }
 
 bool validateEntry(Function &entry, const Target &target, std::string &error) {
   if (entry.isDeclaration()) {
-    error = "Swift module declares but does not define hotfixPatch";
+    error = "patch module declares but does not define hotfixPatch";
     return false;
   }
   if (entry.isVarArg()) {
     error = "hotfixPatch cannot be variadic";
+    return false;
+  }
+  if (target.returnKind == "string" ||
+      llvm::is_contained(target.argumentKinds, "string")) {
+    error = "target '" + target.symbol +
+            "' uses Swift.String; the canonical string-handle schema is "
+            "available, but Swift.String entry rewriting is not implemented";
     return false;
   }
   if (!matchesKind(entry.getReturnType(), target.returnKind)) {
@@ -212,7 +293,8 @@ bool validateEntry(Function &entry, const Target &target, std::string &error) {
   }
 
   const size_t expectedCount =
-      target.argumentKinds.size() + (target.hasReceiver ? 1 : 0);
+      target.argumentKinds.size() +
+      (target.receiverKind == irhotfix::hfir::TargetReceiverKind::None ? 0 : 1);
   if (entry.arg_size() != expectedCount) {
     error = "hotfixPatch parameter count does not match target '" +
             target.symbol + "'";
@@ -220,10 +302,10 @@ bool validateEntry(Function &entry, const Target &target, std::string &error) {
   }
 
   auto argument = entry.arg_begin();
-  if (target.hasReceiver) {
+  if (target.receiverKind != irhotfix::hfir::TargetReceiverKind::None) {
     if (!argument->getType()->isPointerTy()) {
       error =
-          "hotfixPatch must receive the target object as its first parameter";
+          "hotfixPatch must receive the target receiver as its first parameter";
       return false;
     }
     ++argument;
@@ -392,13 +474,40 @@ bool writePatch(Function &entry, StringRef outputPath, std::string &error) {
 bool writeHFPatch(Module &module, Function &entry, const Target &target,
                   StringRef outputPath, std::string &error) {
   irhotfix::hfir::Package package;
+  irhotfix::hfir::TargetABISchema targetABI;
+  if (!makeTargetABI(target, targetABI, error))
+    return false;
   if (!irhotfix::lowering::lowerFunction(
-          module, entry, target.targetID, target.signatureID, package, error))
+          module, entry, target.targetID, target.signatureID, targetABI,
+          package, error))
     return false;
   std::vector<std::uint8_t> bytes;
   if (!irhotfix::container::encode(package, bytes, error))
     return false;
   return irhotfix::container::writeFile(outputPath.str(), bytes, error);
+}
+
+Function *findSourcePatchEntry(Module &module, std::string &error) {
+  if (Function *entry = module.getFunction(PatchEntryName))
+    return entry;
+  if (Function *entry = module.getFunction(SourcePatchEntryName))
+    return entry;
+
+  Function *candidate = nullptr;
+  for (Function &function : module) {
+    if (function.isDeclaration() ||
+        !function.getName().contains(SourcePatchEntryName))
+      continue;
+    if (candidate != nullptr) {
+      error = "patch source defines more than one hotfixPatch candidate";
+      return nullptr;
+    }
+    candidate = &function;
+  }
+  if (candidate == nullptr)
+    error = "patch source must define exactly one top-level function named "
+            "hotfixPatch";
+  return candidate;
 }
 
 bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
@@ -415,24 +524,21 @@ bool buildPatch(StringRef manifestPath, StringRef query, StringRef inputPath,
     raw_string_ostream stream(message);
     diagnostic.print("HotfixPatchTool", stream);
     stream.flush();
-    error =
-        "cannot read Swift LLVM module '" + inputPath.str() + "': " + message;
+    error = "cannot read patch LLVM module '" + inputPath.str() + "': " +
+            message;
     return false;
   }
 
-  Function *entry = module->getFunction(PatchEntryName);
-  if (entry == nullptr) {
-    error = "Swift source must define exactly one top-level function named "
-            "hotfixPatch";
+  Function *entry = findSourcePatchEntry(*module, error);
+  if (entry == nullptr)
     return false;
-  }
   if (!validateEntry(*entry, target, error))
     return false;
   if (!lowerCheckedIntegerArithmetic(*entry, error))
     return false;
   if (module->getFunction(target.symbol) != nullptr) {
-    error =
-        "Swift module already defines target symbol '" + target.symbol + "'";
+    error = "patch module already defines target symbol '" + target.symbol +
+            "'";
     return false;
   }
 

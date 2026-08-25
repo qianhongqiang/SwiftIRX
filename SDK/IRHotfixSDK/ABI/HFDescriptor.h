@@ -9,6 +9,7 @@ typedef uint32_t HFDescriptorFlags;
 enum {
     HFDescriptorFlagNone = 0,
     HFDescriptorFlagHasReceiver = 1u << 0,
+    HFDescriptorFlagNativeReceiver = 1u << 1,
 };
 
 typedef struct HFDescriptor {

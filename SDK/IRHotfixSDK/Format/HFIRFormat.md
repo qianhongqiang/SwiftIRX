@@ -1,17 +1,17 @@
-# HFIR v2 and `.hfpatch` v1
+# HFIR v3 and `.hfpatch` v1
 
 This directory defines the stable compiler/runtime boundary of IRHotfixSDK.
 LLVM IR and Swift runtime calls are compiler inputs only. They are lowered into
 typed semantic HFIR before a patch is published.
 
-## HFIR v2
+## HFIR v3
 
 HFIR is a typed register IR. A function owns an ordered register type table;
 its parameter registers are the prefix of that table. Every other register has
 exactly one definition. Control flow is represented by numbered basic blocks,
 and every block ends in `branch`, `branch.conditional`, or `return`.
 
-The v2 value types are:
+The VM value types are:
 
 ```text
 void bool i64 f64 handle string bytes point size rect
@@ -51,6 +51,29 @@ canonical 64-bit bit pattern and maps to `HFValueKindSignedInteger` at the host
 gateway; signed and unsigned native code preserve the same bits behind that
 single descriptor identity.
 
+Every target embeds a canonical ABI schema independently of its hash:
+
+```text
+return: void | i1 | i64 | f32 | f64 | object | string
+arguments: ordered list of non-void target kinds (maximum 8)
+receiver: none | object | native
+```
+
+`object` crosses the public boundary only as an opaque `HFHandle` with a valid
+token, generation, kind and ownership. `string` has a distinct
+`HFValueKindStringHandle` tag even though its payload is also an `HFHandle`;
+the runtime resolves it under a lease and verifies that the object is
+NSString-compatible. Arguments are borrowed for the invocation scope. Object
+and string results create a new strong handle-table entry and transfer that
+entry to the caller. `native` is receiver-only: a C++ trampoline registers
+`this` as a borrowed `HFHandleKindNativeSymbol` for the synchronous invocation
+scope. Raw pointers are never a valid target ABI value.
+
+F32 and F64 remain distinct in the target schema and signature even though the
+VM normalizes both to F64 while executing. The verifier recomputes the canonical
+signature ID and requires the schema to match the entry function's exact VM
+types, parameter count and receiver position.
+
 `hfir::verify` rejects malformed types, references, register definitions,
 terminators, call signatures, imports, constants, debug locations, and entry
 descriptors before execution. Unknown enum values fail closed.
@@ -85,11 +108,11 @@ Section directory entry (32 bytes)
 ```
 
 Required sections are Metadata, Constants, Host Imports and Functions. Debug
-Information and Signature are optional. Metadata persists only `patchID`,
-`targetID`, `signatureID`, and the entry function index. The compiler uses the
-released Manifest to validate the original symbol and then discards that
-symbol; `.hfpatch` therefore contains neither LLVM text nor Swift mangled
-runtime symbols.
+Information and Signature are optional. Metadata persists `patchID`,
+`targetID`, `signatureID`, the entry function index, and the complete Target ABI
+Schema. The compiler uses the released Manifest to validate the original symbol
+and then discards that symbol; `.hfpatch` therefore contains neither LLVM text
+nor Swift mangled runtime symbols.
 
 The container decoder validates versions, reserved fields, flags, total size,
 integrity hash, directory placement, section ranges/overlaps/counts, and the

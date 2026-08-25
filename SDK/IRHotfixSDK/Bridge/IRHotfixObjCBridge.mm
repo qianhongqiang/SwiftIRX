@@ -448,6 +448,13 @@ void *IRHFObjCCreateConcatenatedString(void *left, void *right) {
     return (__bridge_retained void *)result;
 }
 
+int IRHFObjCIsString(void *object) {
+    if (object == nullptr) {
+        return 0;
+    }
+    return [(__bridge id)object isKindOfClass:NSString.class] ? 1 : 0;
+}
+
 int IRHFObjCIsMainThread(void) {
     return [NSThread isMainThread] ? 1 : 0;
 }

@@ -10,7 +10,8 @@
       "argumentKinds": [
         "i64"
       ],
-      "hasReceiver": true
+      "hasReceiver": true,
+      "receiverKind": "object"
     },
     {
       "symbol": "integerTarget",
@@ -20,7 +21,8 @@
       "argumentKinds": [
         "i64"
       ],
-      "hasReceiver": false
+      "hasReceiver": false,
+      "receiverKind": "none"
     }
   ]
 }

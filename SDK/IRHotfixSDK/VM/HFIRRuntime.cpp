@@ -219,9 +219,11 @@ public:
       return false;
     for (std::uint32_t index = 0; index < frame.argumentCount; ++index) {
       const hfir::ValueType expected = entry.parameterTypes[parameter + index];
+      const hfir::TargetValueKind boundary =
+          package_.target.abi.parameterTypes[index];
       const HFValue &source = frame.arguments[index];
       VMValue decoded;
-      if (!decodeFrameValue(source, expected, decoded))
+      if (!decodeFrameValue(source, boundary, expected, decoded))
         return false;
       arguments.push_back(std::move(decoded));
     }
@@ -233,50 +235,114 @@ public:
   bool hostEffectsStarted() const { return hostEffectsStarted_; }
 
 private:
-  static bool decodeFrameValue(const HFValue &source, hfir::ValueType expected,
-                               VMValue &value) {
-    if (source.flags != HFValueFlagNone)
-      return false;
-    switch (expected) {
-    case hfir::ValueType::Bool:
-      if (source.kind != HFValueKindBool || source.bits > 1)
+  static bool decodeFrameValue(const HFValue &source,
+                               hfir::TargetValueKind boundary,
+                               hfir::ValueType expected, VMValue &value) {
+    switch (boundary) {
+    case hfir::TargetValueKind::Bool:
+      if (expected != hfir::ValueType::Bool ||
+          source.flags != HFValueFlagNone ||
+          source.kind != HFValueKindBool || source.bits > 1)
         return false;
       value = VMValue::scalar(expected, source.bits);
       return true;
-    case hfir::ValueType::I64:
-      if (source.kind != HFValueKindSignedInteger &&
-          source.kind != HFValueKindUnsignedInteger)
+    case hfir::TargetValueKind::I64:
+      if (expected != hfir::ValueType::I64 ||
+          source.flags != HFValueFlagNone ||
+          (source.kind != HFValueKindSignedInteger &&
+           source.kind != HFValueKindUnsignedInteger))
         return false;
       value = VMValue::scalar(expected, source.bits);
       return true;
-    case hfir::ValueType::F64:
-      if (source.kind != HFValueKindFloat64)
+    case hfir::TargetValueKind::F32:
+    case hfir::TargetValueKind::F64:
+      if (expected != hfir::ValueType::F64 ||
+          source.flags != HFValueFlagNone ||
+          source.kind != HFValueKindFloat64)
         return false;
       value = VMValue::scalar(expected, source.bits);
       return true;
-    default:
+    case hfir::TargetValueKind::Object:
+    case hfir::TargetValueKind::String: {
+      if ((boundary == hfir::TargetValueKind::Object &&
+           expected != hfir::ValueType::Handle) ||
+          (boundary == hfir::TargetValueKind::String &&
+           expected != hfir::ValueType::String))
+        return false;
+      HFHandle handle = HFInvalidHandle();
+      const bool decoded = boundary == hfir::TargetValueKind::Object
+                               ? HFValueGetHostHandle(&source, &handle)
+                               : HFValueGetStringHandle(&source, &handle);
+      if (!decoded || (handle.token != 0 &&
+                       source.flags != HFValueFlagBorrowedHostHandle) ||
+          (handle.token != 0 && handle.kind != HFHandleKindObject) ||
+          !VMValue::hostObject(expected, handle, false, value))
+        return false;
+      return boundary != hfir::TargetValueKind::String ||
+             handle.token == 0 || IRHFObjCIsString(value.object) != 0;
+    }
+    case hfir::TargetValueKind::Void:
       return false;
     }
+    return false;
   }
 
-  static bool writeFrameResult(const VMValue &source, HFValue &result) {
+  static bool writeFrameResult(const VMValue &source,
+                               hfir::TargetValueKind boundary,
+                               HFValue &result) {
     result = HFMakeValue(HFValueKindInvalid, 0);
-    switch (source.type) {
-    case hfir::ValueType::Void:
+    switch (boundary) {
+    case hfir::TargetValueKind::Void:
+      if (source.type != hfir::ValueType::Void)
+        return false;
       result = HFMakeValue(HFValueKindVoid, 0);
       return true;
-    case hfir::ValueType::Bool:
+    case hfir::TargetValueKind::Bool:
+      if (source.type != hfir::ValueType::Bool)
+        return false;
       result = HFMakeValue(HFValueKindBool, source.bits);
       return source.bits <= 1;
-    case hfir::ValueType::I64:
+    case hfir::TargetValueKind::I64:
+      if (source.type != hfir::ValueType::I64)
+        return false;
       result = HFMakeValue(HFValueKindSignedInteger, source.bits);
       return true;
-    case hfir::ValueType::F64:
+    case hfir::TargetValueKind::F32:
+    case hfir::TargetValueKind::F64:
+      if (source.type != hfir::ValueType::F64)
+        return false;
       result = HFMakeValue(HFValueKindFloat64, source.bits);
       return true;
-    default:
-      return false;
+    case hfir::TargetValueKind::Object:
+    case hfir::TargetValueKind::String: {
+      const hfir::ValueType expected =
+          boundary == hfir::TargetValueKind::Object
+              ? hfir::ValueType::Handle
+              : hfir::ValueType::String;
+      if (source.type != expected ||
+          (boundary == hfir::TargetValueKind::String &&
+           source.handle.token != 0 && IRHFObjCIsString(source.object) == 0))
+        return false;
+      if (source.handle.token == 0) {
+        result = boundary == hfir::TargetValueKind::Object
+                     ? HFValueFromHostHandle(HFInvalidHandle(),
+                                             HFValueFlagNone)
+                     : HFValueFromStringHandle(HFInvalidHandle(),
+                                               HFValueFlagNone);
+        return true;
+      }
+      HFHandle retained = HFInvalidHandle();
+      if (hf_host_handle_retain(source.handle, &retained) != HFStatusApplied)
+        return false;
+      result = boundary == hfir::TargetValueKind::Object
+                   ? HFValueFromHostHandle(retained,
+                                           HFValueFlagRetainedHostHandle)
+                   : HFValueFromStringHandle(retained,
+                                             HFValueFlagRetainedHostHandle);
+      return true;
     }
+    }
+    return false;
   }
 
   bool executeFunction(std::uint32_t functionIndex,
@@ -1038,8 +1104,9 @@ private:
   }
 
 public:
-  static bool encodeResult(const VMValue &source, HFValue &result) {
-    return writeFrameResult(source, result);
+  static bool encodeResult(const VMValue &source,
+                           hfir::TargetValueKind boundary, HFValue &result) {
+    return writeFrameResult(source, boundary, result);
   }
 
 private:
@@ -1087,13 +1154,10 @@ HFStatus hf_hfir_vm_invoke(HFPatchFrame *frame) {
     return finish(frame, HFStatusInvalidArguments);
   const bool hasReceiver =
       (frame->flags & HFPatchFrameFlagHasReceiver) != 0;
-  if (hasReceiver) {
-    if (frame->receiver.kind != HFHandleKindObject ||
-        hf_host_handle_validate(frame->receiver) != HFStatusApplied)
-      return finish(frame, HFStatusInvalidFrame);
-  } else if (frame->receiver.token != 0 || frame->receiver.generation != 0 ||
+  if (!hasReceiver &&
+      (frame->receiver.token != 0 || frame->receiver.generation != 0 ||
              frame->receiver.kind != HFHandleKindInvalid ||
-             frame->receiver.flags != HFHandleFlagNone) {
+             frame->receiver.flags != HFHandleFlagNone)) {
     return finish(frame, HFStatusInvalidFrame);
   }
 
@@ -1102,6 +1166,22 @@ HFStatus hf_hfir_vm_invoke(HFPatchFrame *frame) {
     return finish(frame, HFStatusNoPatch);
   if (patch->package.target.signatureID != frame->signatureID)
     return finish(frame, HFStatusSignatureMismatch);
+  const hfir::TargetABISchema &targetABI = patch->package.target.abi;
+  const bool schemaHasReceiver =
+      targetABI.receiverKind != hfir::TargetReceiverKind::None;
+  if (schemaHasReceiver != hasReceiver)
+    return finish(frame, HFStatusSignatureMismatch);
+  if (hasReceiver) {
+    const HFHandleKind expectedReceiverKind =
+        targetABI.receiverKind == hfir::TargetReceiverKind::Native
+            ? HFHandleKindNativeSymbol
+            : HFHandleKindObject;
+    if (frame->receiver.kind != expectedReceiverKind ||
+        hf_host_handle_validate(frame->receiver) != HFStatusApplied)
+      return finish(frame, HFStatusInvalidFrame);
+  }
+  if (targetABI.parameterTypes.size() != frame->argumentCount)
+    return finish(frame, HFStatusInvalidArguments);
   try {
     Executor executor(patch->package);
     try {
@@ -1110,7 +1190,8 @@ HFStatus hf_hfir_vm_invoke(HFPatchFrame *frame) {
         return finish(frame, executor.hostEffectsStarted()
                                  ? HFStatusExecutionCommitted
                                  : HFStatusExecutionFailed);
-      if (!Executor::encodeResult(result, frame->result))
+      if (!Executor::encodeResult(result, patch->package.target.abi.returnType,
+                                  frame->result))
         return finish(frame, executor.hostEffectsStarted()
                                  ? HFStatusExecutionCommitted
                                  : HFStatusInvalidResult);

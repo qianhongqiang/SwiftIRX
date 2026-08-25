@@ -21,6 +21,10 @@ if [[ ! -r "$ADAPTER_INPUT" ]]; then
 fi
 
 MANIFESTS=()
+NATIVE_MANIFEST="$SRCROOT/IR/NativeExamples/HotfixNativeTargetManifest.json"
+if [[ -r "$NATIVE_MANIFEST" ]]; then
+  MANIFESTS+=("$NATIVE_MANIFEST")
+fi
 if [[ -d "$OBJECT_FILE_DIR_normal" ]]; then
   while IFS= read -r -d '' MANIFEST; do
     MANIFESTS+=("$MANIFEST")

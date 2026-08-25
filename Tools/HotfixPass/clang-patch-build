@@ -1,0 +1,120 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CMAKE="${IR_HOTFIX_CMAKE:-/opt/homebrew/bin/cmake}"
+PATCH_TOOL="${IR_HOTFIX_PATCH_TOOL:-$ROOT/Tools/HotfixPass/.build/HotfixPatchTool}"
+
+fail() {
+  echo "[ClangPatchBuild] error: $*" >&2
+  exit 1
+}
+
+usage() {
+  echo "usage: clang-patch-build --language c|cxx --manifest <HotfixTargetManifest.json> --target <query> --source <Patch.c|Patch.cpp> --output <Patch.irpatch|Patch.hfpatch> [--sdk iphonesimulator|iphoneos] [--arch arm64] [--deployment-target 26.2]" >&2
+  exit 64
+}
+
+language=""
+manifest=""
+target_query=""
+source_file=""
+output_file=""
+sdk_name="iphonesimulator"
+architecture="arm64"
+deployment_target="26.2"
+
+while (($# > 0)); do
+  case "$1" in
+    --language | --manifest | --target | --source | --output | --sdk | --arch | --deployment-target)
+      (($# >= 2)) || usage
+      option="$1"
+      value="$2"
+      shift 2
+      case "$option" in
+        --language) language="$value" ;;
+        --manifest) manifest="$value" ;;
+        --target) target_query="$value" ;;
+        --source) source_file="$value" ;;
+        --output) output_file="$value" ;;
+        --sdk) sdk_name="$value" ;;
+        --arch) architecture="$value" ;;
+        --deployment-target) deployment_target="$value" ;;
+      esac
+      ;;
+    -h | --help) usage ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+[[ "$language" == "c" || "$language" == "cxx" ]] || usage
+[[ -n "$manifest" && -n "$target_query" && -n "$source_file" && -n "$output_file" ]] || usage
+[[ -r "$manifest" && -f "$manifest" ]] || fail "manifest is not readable: $manifest"
+[[ -r "$source_file" && -f "$source_file" ]] || fail "patch source is not readable: $source_file"
+[[ "$sdk_name" == "iphonesimulator" || "$sdk_name" == "iphoneos" ]] ||
+  fail "unsupported SDK: $sdk_name"
+
+if [[ ! -x "$PATCH_TOOL" ]]; then
+  [[ -x "$CMAKE" ]] || fail "CMake is missing: $CMAKE"
+  tool_build="$ROOT/Tools/HotfixPass/.patch-tool-build"
+  "$CMAKE" -S "$ROOT/Tools/HotfixPass" -B "$tool_build" -DCMAKE_BUILD_TYPE=Release
+  "$CMAKE" --build "$tool_build" --config Release --target HotfixPatchTool
+  PATCH_TOOL="$tool_build/HotfixPatchTool"
+fi
+[[ -x "$PATCH_TOOL" ]] || fail "HotfixPatchTool is missing: $PATCH_TOOL"
+
+sdk_path="$(xcrun --sdk "$sdk_name" --show-sdk-path)"
+compiler="$(xcrun --sdk "$sdk_name" --find clang)"
+if [[ "$language" == "cxx" ]]; then
+  compiler="$(xcrun --sdk "$sdk_name" --find clang++)"
+fi
+if [[ "$sdk_name" == "iphonesimulator" ]]; then
+  clang_target="$architecture-apple-ios$deployment_target-simulator"
+else
+  clang_target="$architecture-apple-ios$deployment_target"
+fi
+
+temp="$(mktemp -d "${TMPDIR:-/tmp}/clang-hotfix-patch.XXXXXX")"
+atomic_output=""
+cleanup() {
+  find "$temp" -type f -delete
+  find "$temp" -depth -type d -empty -delete
+  if [[ -n "$atomic_output" && -e "$atomic_output" ]]; then
+    find "$atomic_output" -delete
+  fi
+}
+trap cleanup EXIT
+
+compiler_flags=(
+  -emit-llvm
+  -c
+  -O1
+  -g0
+  -fno-vectorize
+  -fno-slp-vectorize
+  -isysroot "$sdk_path"
+  -target "$clang_target"
+)
+if [[ "$language" == "cxx" ]]; then
+  compiler_flags+=(
+    -std=c++20
+    -fno-exceptions
+    -fno-rtti
+  )
+fi
+"$compiler" "${compiler_flags[@]}" "$source_file" -o "$temp/Patch.bc"
+
+output_directory="$(dirname "$output_file")"
+[[ -d "$output_directory" && -w "$output_directory" ]] ||
+  fail "patch output directory is not writable: $output_directory"
+atomic_output="$(mktemp "$output_directory/.$(basename "$output_file").XXXXXX")"
+"$PATCH_TOOL" build \
+  "$manifest" \
+  "$target_query" \
+  "$temp/Patch.bc" \
+  "$atomic_output"
+mv -f "$atomic_output" "$output_file"
+atomic_output=""
+
+echo "[ClangPatchBuild] wrote $output_file"

@@ -12,6 +12,8 @@ nonisolated enum HotfixValueKind: UInt8, Codable, Sendable {
     case void = 3
     case float = 4
     case double = 5
+    case object = 6
+    case string = 7
 
     var abiName: String {
         switch self {
@@ -20,6 +22,8 @@ nonisolated enum HotfixValueKind: UInt8, Codable, Sendable {
         case .void: "void"
         case .float: "f32"
         case .double: "f64"
+        case .object: "object"
+        case .string: "string"
         }
     }
 }
@@ -32,6 +36,8 @@ nonisolated enum HotfixABI {
     static let boolKind = UInt32(HFValueKindBool)
     static let voidKind = UInt32(HFValueKindVoid)
     static let invalidKind = UInt32(HFValueKindInvalid)
+    static let objectKind = UInt32(HFValueKindHostHandle)
+    static let stringKind = UInt32(HFValueKindStringHandle)
 
     static let hasReceiverFlag = UInt32(HFPatchFrameFlagHasReceiver)
     static let objectHandleKind = UInt16(HFHandleKindObject)
@@ -45,6 +51,14 @@ nonisolated enum HotfixTargetValueKind: String, Codable, Sendable {
     case void
     case float = "f32"
     case double = "f64"
+    case object
+    case string
+}
+
+nonisolated enum HotfixTargetReceiverKind: String, Codable, Sendable {
+    case none
+    case object
+    case native
 }
 
 nonisolated struct HotfixTargetDescriptor: Codable, Equatable, Sendable {
@@ -54,6 +68,11 @@ nonisolated struct HotfixTargetDescriptor: Codable, Equatable, Sendable {
     let returnKind: HotfixTargetValueKind
     let argumentKinds: [HotfixTargetValueKind]
     let hasReceiver: Bool
+    let receiverKind: HotfixTargetReceiverKind?
+
+    var effectiveReceiverKind: HotfixTargetReceiverKind {
+        receiverKind ?? (hasReceiver ? .object : .none)
+    }
 
     var targetIDValue: UInt64? { Self.decodeHexID(targetID) }
     var signatureIDValue: UInt64? { Self.decodeHexID(signatureID) }

@@ -152,6 +152,31 @@ final class HotfixExampleDetailViewController: UIViewController {
             runUIKitPatch()
         case .hostAdapter:
             runScalarPatch(input: 10, baseline: hotfixExampleHostAdapter)
+        case .cFunction:
+            runNativeScalarPatch(input: 10, baseline: hotfix_example_c_add)
+        case .cxxMethod:
+            runNativeScalarPatch(input: 8, baseline: hotfix_example_cxx_multiply)
+        }
+    }
+
+    private func runNativeScalarPatch(
+        input: Int64,
+        baseline: (Int64) -> Int64
+    ) {
+        do {
+            let activation = try activateBundledPatchIfPresent()
+            defer {
+                if let activation {
+                    HotfixManager.shared.deactivate(activation)
+                }
+            }
+            let value = baseline(input)
+            resultLabel.text = activation == nil
+                ? "发布版：\(input) → \(value)\n未找到 \(example.patchResource).hfpatch"
+                : "Patch 已生效：\(input) → \(value)"
+            resultLabel.textColor = activation == nil ? .secondaryLabel : .systemGreen
+        } catch {
+            show(error: error)
         }
     }
 

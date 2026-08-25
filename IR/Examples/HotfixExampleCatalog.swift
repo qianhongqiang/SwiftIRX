@@ -6,6 +6,8 @@ enum HotfixExampleKind: String, Sendable {
     case instanceMethod
     case uikit
     case hostAdapter
+    case cFunction
+    case cxxMethod
 }
 
 struct HotfixExample: Sendable {
@@ -176,6 +178,62 @@ enum HotfixExampleCatalog {
                     }
                     """,
                     behavior: "输入 10：Patch 通过生成的 Swift Adapter 调用 hotfixableAdd，再返回 22。"
+                ),
+            ]
+        ),
+        HotfixExampleSection(
+            title: "C / C++",
+            examples: [
+                HotfixExample(
+                    kind: .cFunction,
+                    title: "C 自由函数",
+                    summary: "C ABI、标量参数和无 receiver 调用",
+                    icon: "C",
+                    badge: "C ABI",
+                    tintName: "orange",
+                    patchResource: "HotfixC",
+                    releaseSource: """
+                    int64_t hotfix_example_c_add(int64_t value) {
+                        // 通用 trampoline，未命中 Patch 时回退。
+                        return value + 2;
+                    }
+                    """,
+                    patchSource: """
+                    int64_t hotfixPatch(int64_t value) {
+                        return value + 200;
+                    }
+                    """,
+                    behavior: "输入 10：发布版返回 12，Clang Patch 构建后返回 210。"
+                ),
+                HotfixExample(
+                    kind: .cxxMethod,
+                    title: "C++ 实例方法",
+                    summary: "非虚方法、native receiver 和局部 helper",
+                    icon: "C++",
+                    badge: "NATIVE",
+                    tintName: "green",
+                    patchResource: "HotfixCXX",
+                    releaseSource: """
+                    class HFCalculator final {
+                    public:
+                        long long multiply(long long value) {
+                            // this 作为 native scoped handle 传入 VM。
+                            return value * 2;
+                        }
+                    };
+                    """,
+                    patchSource: """
+                    __attribute__((noinline))
+                    static long long patchedMultiply(long long value) {
+                        return value * 5;
+                    }
+
+                    long long hotfixPatch(void *receiver, long long value) {
+                        (void)receiver;
+                        return patchedMultiply(value);
+                    }
+                    """,
+                    behavior: "输入 8：发布版返回 16，Patch 提取局部 helper 后返回 40。"
                 ),
             ]
         ),
